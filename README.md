@@ -32,8 +32,7 @@
 - 欢迎贡献！提issue或PR~
 
 ## 作者
-记！（@wnl50240174 on X）
+今晚打老虎🐯
 
-感谢Claude/Grok等AI帮我零基础开发，证明普通人也能做开源项目！
 
 License: GPLv3
