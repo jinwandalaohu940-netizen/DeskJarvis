@@ -4,7 +4,8 @@
  * 生产环境自动禁用调试日志
  */
 
-const isDev = import.meta.env.DEV;
+// @ts-ignore - Vite 环境变量
+const isDev = import.meta.env?.DEV ?? true;
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 

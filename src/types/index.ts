@@ -19,6 +19,10 @@ export interface StepResult {
   success: boolean;
   message: string;
   data: any;
+  /** 生成的图片路径 */
+  images?: string[];
+  /** 自动安装的包 */
+  installed_packages?: string[];
 }
 
 /**

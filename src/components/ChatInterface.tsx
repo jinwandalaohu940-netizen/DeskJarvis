@@ -14,7 +14,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult } from "../types";
+import { ChatMessage, TaskStatus, AppConfig, LogEntry, TaskResult, AgentType } from "../types";
 import { executeTask, isTauriEnvironment } from "../utils/tauri";
 import { ChatSidebar, ChatSession } from "./ChatSidebar";
 import { UserInputDialog, InputRequest } from "./UserInputDialog";
@@ -55,7 +55,7 @@ interface ChatInterfaceProps {
   /** 执行模式变化回调 */
   onExecutionModeChange?: (mode: "single-agent" | "multi-agent") => void;
   /** 活动 Agent 变化回调 */
-  onActiveAgentChange?: (agent: string | undefined) => void;
+  onActiveAgentChange?: React.Dispatch<React.SetStateAction<AgentType | undefined>>;
 }
 
 /**
@@ -96,7 +96,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   
   // 多代理协作状态
   const [executionMode, setExecutionMode] = useState<"single-agent" | "multi-agent">("single-agent");
-  const [activeAgent, setActiveAgent] = useState<string | undefined>(undefined);
+  const [activeAgent, setActiveAgent] = useState<AgentType | undefined>(undefined);
   const [copyToast, setCopyToast] = useState<{ show: boolean; message: string }>({ show: false, message: "" });
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // 追踪已复制的消息ID
   const messagesEndRef = useRef<HTMLDivElement>(null);
