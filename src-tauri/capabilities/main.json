@@ -1,0 +1,22 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capabilities",
+  "description": "DeskJarvis 主窗口权限配置",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "shell:allow-open",
+    "fs:read-files",
+    "fs:allow-home-read-recursive",
+    "fs:allow-desktop-read-recursive",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        "$HOME/**",
+        "$DESKTOP/**",
+        "$DOWNLOAD/**",
+        "$DOCUMENT/**"
+      ]
+    }
+  ]
+}
