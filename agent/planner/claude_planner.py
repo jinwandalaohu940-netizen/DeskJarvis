@@ -267,6 +267,18 @@ execute_python_script 的 params:
 5. 注释使用中文，变量名使用英文
 6. 用户主目录: {home_dir}
 7. **错误处理**：所有操作必须在 try-except 中，except 中输出 JSON 格式的错误信息
+8. **HTTP 请求（重要！）**：
+   - **必须使用 requests 库**，不要用 urllib！urllib 不会自动解压 gzip！
+   - `import requests` → `response = requests.get(url)`
+   - 下载二进制文件用 `response.content`，下载文本用 `response.text`
+   - 示例：
+     ```python
+     import requests
+     response = requests.get(url)
+     html = response.text  # 文本
+     with open(path, "wb") as f:
+         f.write(response.content)  # 二进制文件
+     ```
 
 **脚本示例（删除文件）**：
 ```python

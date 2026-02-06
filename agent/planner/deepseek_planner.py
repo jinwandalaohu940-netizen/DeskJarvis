@@ -272,6 +272,22 @@ class DeepSeekPlanner(BasePlanner):
   * Python布尔值：使用 `True`/`False`（首字母大写），不是 `true`/`false`
   * 浏览器操作：使用 `playwright.sync_api` 模块
   * 文件操作：使用 `os`, `shutil`, `pathlib` 模块
+  * **HTTP 请求（重要！）**：
+    - **必须使用 requests 库**，不要用 urllib！
+    - `import requests` → `response = requests.get(url)`
+    - `requests` 会自动处理 gzip 解压，`urllib` 不会！
+    - 下载二进制文件：`response.content`（不是 `response.text`）
+    - 下载文本：`response.text`（自动处理编码）
+    - 示例：
+      ```python
+      import requests
+      response = requests.get(url)
+      # 文本内容
+      html = response.text
+      # 二进制内容（下载文件）
+      with open(path, "wb") as f:
+          f.write(response.content)
+      ```
   * **Word文档处理（.docx）**：
     - **必须使用 python-docx 库**：`from docx import Document`
     - **绝对禁止用 open() 读取 .docx 文件**！.docx 是 ZIP 压缩包，不是文本文件，用 open() 会报 UnicodeDecodeError
