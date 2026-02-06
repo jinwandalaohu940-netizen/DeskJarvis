@@ -158,8 +158,10 @@ class DeskJarvisAgent:
             # 翻译/总结/截图/打开应用等不需要完整规划流程
             fast_result = self._try_fast_path(user_instruction, context, emit)
             if fast_result is not None:
-                logger.info("快速通道命中，跳过完整规划流程")
+                logger.warning("⚠️ 快速通道命中，跳过完整规划流程")
                 return fast_result
+            else:
+                logger.warning("✅ 快速通道未命中，将调用AI规划")
             
             # ========== 阶段0: 获取记忆上下文 ==========
             memory_context = self.memory.get_context_for_instruction(user_instruction)
@@ -529,9 +531,19 @@ class DeskJarvisAgent:
         match = re.match(r'^(?:帮我)?(?:请)?打开\s*(.+)$', inst)
         if match:
             target = match.group(1).strip()
-            # 排除复杂指令（"打开浏览器然后xxx"）
+            logger.warning(f"🔍 Fast path检测到'打开'指令，target: '{target}'")
+            # 排除复杂指令（包含后续操作的，让AI来处理）
+            # 检查连接词
             if any(kw in target for kw in ["然后", "并且", "接着", "之后"]):
+                logger.warning(f"  ✅ 检测到连接词，返回None，让AI处理")
                 return None
+            # 检查动作词（如果有后续操作，让AI来处理）
+            action_words = ["控制", "输入", "搜索", "按", "按下", "点击", "填写", "下载", "截图"]
+            has_action = any(kw in target for kw in action_words)
+            if has_action:
+                logger.warning(f"  ✅ 检测到动作词: {[kw for kw in action_words if kw in target]}，返回None，让AI处理")
+                return None
+            logger.warning(f"  ⚠️ 未检测到动作词，fast path将处理（可能有问题）")
             # 判断是路径还是应用名
             if '/' in target or target.startswith('~'):
                 dot_in_last = '.' in target.split('/')[-1]
@@ -910,6 +922,7 @@ class DeskJarvisAgent:
             "steps": [],
             "user_instruction": instruction
         }
+    
     
     def _format_plan_for_user(self, steps: List[Dict[str, Any]]) -> str:
         """格式化计划，让用户看到我要做什么"""

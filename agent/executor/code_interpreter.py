@@ -90,6 +90,21 @@ class CodeInterpreter:
         r"open\s*\(['\"]\/(?:etc|root|home)",
     ]
     
+    # 高权操作模式（需要实时观察）
+    HIGH_RISK_PATTERNS = [
+        r"os\.remove\(",
+        r"os\.unlink\(",
+        r"shutil\.rmtree\(",
+        r"shutil\.remove\(",
+        r"os\.rename\(",
+        r"shutil\.move\(",
+        r"shutil\.copy\(",
+        r"shutil\.copy2\(",
+        r"for\s+.*\s+in\s+.*:\s*.*\.(remove|rename|move|unlink|rmtree)\(",
+        r"\.remove\(",
+        r"\.rename\(",
+    ]
+    
     def __init__(self, sandbox_path: Path, emit_callback=None):
         """
         初始化代码解释器
@@ -706,9 +721,46 @@ _dj_save_current_figure()
         # 保存逻辑放在末尾
         return injected + runtime_block + save_code
     
+    def _check_high_risk_operation(self, code: str) -> bool:
+        """
+        检查代码是否包含高权操作（需要实时观察）
+        
+        Args:
+            code: 代码字符串
+            
+        Returns:
+            是否包含高权操作
+        """
+        for pattern in self.HIGH_RISK_PATTERNS:
+            if re.search(pattern, code, re.IGNORECASE):
+                return True
+        return False
+    
     def _execute_code(self, code: str) -> CodeExecutionResult:
         """
-        执行代码
+        执行代码（支持实时观察 - Phase 1）
+        
+        Returns:
+            执行结果
+        """
+        # 检查是否包含高权操作
+        has_high_risk = self._check_high_risk_operation(code)
+        
+        if has_high_risk:
+            # 高权操作：启用实时观察模式
+            logger.info("检测到高权操作，启用实时观察模式")
+            if self.emit:
+                self.emit("thinking", {
+                    "content": "检测到高风险操作，正在启用实时观察模式...",
+                    "phase": "high_risk_detected"
+                })
+        
+        # 执行代码（当前版本仍使用直接执行，Phase 1的块级执行将在后续版本中实现）
+        return self._execute_code_direct(code)
+    
+    def _execute_code_direct(self, code: str) -> CodeExecutionResult:
+        """
+        直接执行代码（不进行实时观察）
         
         Returns:
             执行结果

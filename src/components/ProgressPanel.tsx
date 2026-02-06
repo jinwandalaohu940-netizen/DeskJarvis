@@ -63,7 +63,11 @@ const StepItem: React.FC<{
   status: StepStatus;
   index: number;
   total: number;
-}> = ({ step, result, status, index, total }) => {
+  allSteps?: Array<{
+    step: TaskStep;
+    result?: StepResult;
+  }>;
+}> = ({ step, result, status, index, total, allSteps }) => {
   return (
     <motion.div
       initial={{ opacity: 0, y: 5 }}
@@ -122,42 +126,130 @@ const StepItem: React.FC<{
           </div>
         )}
         
-        {/* 显示生成的图表 */}
-        {result?.images && Array.isArray(result.images) && result.images.length > 0 && (
-          <div className="mt-3 space-y-2">
-            {result.images.map((imagePath: string, idx: number) => (
-              <div 
-                key={idx} 
-                className="group rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 hover:border-emerald-400 dark:hover:border-emerald-500 transition-all cursor-pointer bg-gradient-to-r from-gray-50 to-white dark:from-gray-800/50 dark:to-gray-800 hover:shadow-md"
-                onClick={async () => {
-                  try {
-                    const { invoke } = await import('@tauri-apps/api/core');
-                    await invoke('open_file', { path: imagePath });
-                  } catch (e) {
-                    navigator.clipboard.writeText(imagePath);
+        {/* 显示生成的图表和文件 */}
+        {(() => {
+          // 如果是删除操作，不显示预览（文件已被删除）
+          const stepType = step?.type;
+          if (stepType === "file_delete") {
+            return null;
+          }
+          
+          // 检查当前步骤的文件路径是否在后续步骤中被重命名
+          const checkIfRenamed = (filePath: string): boolean => {
+            if (!allSteps || index >= allSteps.length - 1) return false;
+            
+            // 检查后续步骤中是否有重命名操作涉及这个文件
+            for (let i = index + 1; i < allSteps.length; i++) {
+              const laterStep = allSteps[i];
+              const laterStepType = laterStep.step?.type;
+              const laterStepData = laterStep.result?.data;
+              
+              if ((laterStepType === "file_rename" || laterStepType === "file_move") && laterStepData) {
+                const sourcePath = laterStepData.source || laterStepData.path;
+                if (sourcePath === filePath) {
+                  return true; // 这个文件在后续步骤中被重命名了
+                }
+              }
+            }
+            return false;
+          };
+          
+          // 收集所有文件路径：从images数组和data.path中
+          // 对于重命名操作，优先使用target（新路径）而不是source（旧路径）
+          const filePaths: string[] = [];
+          
+          // 从images数组中收集
+          if (result?.images && Array.isArray(result.images)) {
+            filePaths.push(...result.images);
+          }
+          
+          // 从data.path中收集（截图、下载等）
+          if (result?.data?.path && typeof result.data.path === 'string') {
+            const path = result.data.path;
+            // 检查这个路径是否在后续步骤中被重命名
+            if (!checkIfRenamed(path)) {
+              // 避免重复
+              if (!filePaths.includes(path)) {
+                filePaths.push(path);
+              }
+            }
+          }
+          
+          // 从data中收集其他可能的文件路径字段
+          if (result?.data && typeof result.data === 'object') {
+            const data = result.data as Record<string, any>;
+            
+            // 对于重命名/移动操作，优先使用target（新路径）
+            if (data.target && typeof data.target === 'string') {
+              const targetPath = data.target;
+              // 移除旧路径（source），添加新路径（target）
+              const sourcePath = data.source;
+              if (sourcePath && filePaths.includes(sourcePath)) {
+                const idx = filePaths.indexOf(sourcePath);
+                filePaths.splice(idx, 1);
+              }
+              if (!filePaths.includes(targetPath)) {
+                filePaths.push(targetPath);
+              }
+            } else {
+              // 检查常见的文件路径字段
+              ['saved_path', 'output_path', 'file_path', 'target_path', 'new_path'].forEach(key => {
+                if (data[key] && typeof data[key] === 'string') {
+                  const path = data[key];
+                  // 检查这个路径是否在后续步骤中被重命名
+                  if (!checkIfRenamed(path) && !filePaths.includes(path)) {
+                    filePaths.push(path);
                   }
-                }}
-              >
-                <div className="p-3 flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-400 to-teal-500 flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                    </svg>
+                }
+              });
+            }
+          }
+          
+          if (filePaths.length === 0) return null;
+          
+          return (
+            <div className="mt-3 space-y-2">
+              {filePaths.map((filePath: string, idx: number) => {
+                const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(filePath);
+                
+                return (
+                  <div key={idx} className="flex items-center justify-end">
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        try {
+                          const { invoke } = await import('@tauri-apps/api/core');
+                          console.log('🖱️ 点击查看按钮，文件路径:', filePath);
+                          const result = await invoke('open_file', { path: filePath });
+                          console.log('✅ 打开文件成功:', result);
+                        } catch (error: any) {
+                          console.error('❌ 打开文件失败:', error);
+                          // 尝试复制路径到剪贴板
+                          try {
+                            await navigator.clipboard.writeText(filePath);
+                            console.log('📋 已复制路径到剪贴板');
+                          } catch (clipError) {
+                            console.error('❌ 复制失败:', clipError);
+                          }
+                        }
+                      }}
+                      className="px-2 py-1 rounded text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors flex items-center gap-1"
+                      type="button"
+                      title={filePath}
+                    >
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      <span>查看</span>
+                    </button>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-700 dark:text-gray-200 truncate">
-                      {imagePath.split('/').pop()}
-                    </div>
-                    <div className="text-xs text-gray-400">点击打开</div>
-                  </div>
-                  <svg className="w-4 h-4 text-gray-400 group-hover:text-emerald-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          );
+        })()}
         
         {/* 显示自动安装的包 */}
         {result?.installed_packages && Array.isArray(result.installed_packages) && result.installed_packages.length > 0 && (
@@ -432,6 +524,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
                         status={stepStatus}
                         index={index}
                         total={steps.length}
+                        allSteps={steps}
                       />
                     );
                   })}

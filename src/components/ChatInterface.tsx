@@ -760,13 +760,35 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         // onStepsChange 由 useEffect 自动同步
       }
 
-      // 检查是否有截图结果，提取图片路径
+      // 检查是否有截图结果，提取图片路径（追踪文件路径变化，使用最终路径）
       log.debug("🔍 [图片预览] 开始检查任务结果...");
       log.debug("🔍 [图片预览] 任务结果:", JSON.stringify(result, null, 2));
       
       const screenshotPaths: string[] = [];
+      // 用于追踪文件路径的变化（旧路径 -> 新路径）
+      const pathMapping = new Map<string, string>();
+      
       if (result.steps && result.steps.length > 0) {
         log.debug(`🔍 [图片预览] 找到 ${result.steps.length} 个步骤`);
+        
+        // 第一遍：收集所有文件路径变化（重命名、移动等）
+        for (const stepItem of result.steps) {
+          const stepType = stepItem.step?.type;
+          const stepResult = stepItem.result;
+          const stepData = stepResult?.data;
+          
+          // 追踪重命名和移动操作
+          if ((stepType === "file_rename" || stepType === "file_move") && stepResult?.success && stepData) {
+            const oldPath = stepData.source || stepData.path;
+            const newPath = stepData.target || stepData.new_path;
+            if (oldPath && newPath) {
+              pathMapping.set(oldPath, newPath);
+              log.debug(`🔄 [图片预览] 路径映射: ${oldPath} -> ${newPath}`);
+            }
+          }
+        }
+        
+        // 第二遍：收集截图路径，并应用路径映射
         for (const stepItem of result.steps) {
           const stepType = stepItem.step?.type;
           const stepResult = stepItem.result;
@@ -776,16 +798,61 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             stepType, 
             success: stepResult?.success, 
             path: stepData?.path,
+            target: stepData?.target,
             data: stepData
           });
           
+          // 收集截图路径
           if (
             stepType === "screenshot_desktop" &&
             stepResult?.success &&
             stepData?.path
           ) {
-            log.debug("✅ [图片预览] 找到截图路径:", stepData.path);
-            screenshotPaths.push(stepData.path);
+            let finalPath = stepData.path;
+            
+            // 追踪路径变化，找到最终路径
+            let currentPath = finalPath;
+            const visited = new Set<string>(); // 防止循环
+            while (pathMapping.has(currentPath) && !visited.has(currentPath)) {
+              visited.add(currentPath);
+              currentPath = pathMapping.get(currentPath)!;
+              log.debug(`🔄 [图片预览] 路径追踪: ${finalPath} -> ${currentPath}`);
+            }
+            finalPath = currentPath;
+            
+            log.debug(`✅ [图片预览] 找到截图路径（最终）: ${finalPath}`);
+            screenshotPaths.push(finalPath);
+          }
+          
+          // 也检查重命名操作，如果重命名的是图片文件，也添加到预览列表
+          if (
+            (stepType === "file_rename" || stepType === "file_move") &&
+            stepResult?.success &&
+            stepData?.target
+          ) {
+            const targetPath = stepData.target;
+            // 检查是否是图片文件
+            const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'];
+            const isImage = imageExtensions.some(ext => targetPath.toLowerCase().endsWith(ext));
+            
+            if (isImage) {
+              // 检查这个文件是否已经在列表中（可能是从截图步骤来的）
+              const isAlreadyIncluded = screenshotPaths.some(path => {
+                // 检查是否是同一个文件（通过路径映射）
+                let checkPath = path;
+                const visited = new Set<string>();
+                while (pathMapping.has(checkPath) && !visited.has(checkPath)) {
+                  visited.add(checkPath);
+                  checkPath = pathMapping.get(checkPath)!;
+                }
+                return checkPath === targetPath;
+              });
+              
+              if (!isAlreadyIncluded) {
+                log.debug(`✅ [图片预览] 找到重命名后的图片路径: ${targetPath}`);
+                screenshotPaths.push(targetPath);
+              }
+            }
           }
         }
       } else {

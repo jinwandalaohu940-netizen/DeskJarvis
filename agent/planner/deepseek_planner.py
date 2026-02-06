@@ -84,11 +84,22 @@ class DeepSeekPlanner(BasePlanner):
 
             response = call_llm(messages)
             content = response.choices[0].message.content or ""
-            logger.debug(f"AI响应: {content[:500]}...")
+            logger.warning(f"🔵 正在调用DeepSeek API规划任务...")
+            logger.warning(f"🔵 DeepSeek原始响应（前2000字符）: {content[:2000]}...")
+            logger.debug(f"DeepSeek完整响应: {content}")
 
             # 解析响应：若 JSON 格式失败，自动重试一次（仅修复输出格式）
             try:
                 steps = self._parse_response(content)
+                logger.warning(f"🔵 解析后的步骤列表: {steps}")
+                
+                # 检查是否有open_app步骤，记录app_name用于调试
+                for i, step in enumerate(steps):
+                    if step.get("type") == "open_app":
+                        app_name = step.get("params", {}).get("app_name", "")
+                        logger.warning(f"🔵 步骤{i+1} open_app的app_name: '{app_name}' (长度: {len(app_name)})")
+                        if len(app_name) > 20 or any(kw in app_name for kw in ["控制", "输入", "搜索", "按"]):
+                            logger.error(f"❌ 检测到可疑的app_name: '{app_name}'，可能包含后续操作！AI没有正确拆分步骤！")
             except Exception as e:
                 logger.warning(f"解析规划结果失败，将重试一次修复输出格式: {e}")
                 retry_messages = [
@@ -292,6 +303,11 @@ class DeepSeekPlanner(BasePlanner):
         
         prompt = f"""你是一个AI任务规划助手。请理解用户的自然语言指令，生成可执行的任务步骤。
 
+**核心原则**：
+- **理解用户的真实意图**：仔细分析用户的自然语言指令，理解用户想做什么
+- **拆分多个操作**：如果用户指令包含多个操作（如"打开应用然后输入文本"），必须拆分为多个步骤
+- **每个步骤只做一件事**：一个步骤只执行一个操作
+
 **最重要的规则（必须遵守！）**：
 - **调整亮度** → 必须用 `set_brightness` 工具，绝对不要用脚本！
 - **调整音量** → 必须用 `set_volume` 工具，绝对不要用脚本！
@@ -320,8 +336,8 @@ class DeepSeekPlanner(BasePlanner):
 - screenshot_desktop: 截图桌面 → params: {{"save_path": "保存路径（可选）"}}
 - open_file: 打开文件 → params: {{"file_path": "文件路径"}}
 - open_folder: 打开文件夹 → params: {{"folder_path": "文件夹路径"}}
-- open_app: 打开应用 → params: {{"app_name": "应用名"}}
-- close_app: 关闭应用 → params: {{"app_name": "应用名"}}
+- open_app: 打开应用 → params: {{"app_name": "应用名称"}}
+- close_app: 关闭应用 → params: {{"app_name": "应用名称"}}
 - execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
 {browser_section}
 **系统控制工具**：
@@ -335,7 +351,9 @@ class DeepSeekPlanner(BasePlanner):
 - keyboard_shortcut: 按键/快捷键（用于回车/Tab/Esc/方向键/⌘C 等）→ params: {{"keys": "command+c"}}，可选 {{"repeat": 2}}（如按两次回车）
 
 **键盘规则（重要！）**：
-- **输入文字**用 `keyboard_type`（例如输入 zhangxuzheng）
+- **输入文字**用 `keyboard_type`（支持中文、英文、数字、符号）
+  - 示例：输入"张旭政" → `{{"type":"keyboard_type","params":{{"text":"张旭政"}}}}`
+  - 示例：输入"zhangxuzheng" → `{{"type":"keyboard_type","params":{{"text":"zhangxuzheng"}}}}`
 - **按回车/Tab/Esc/方向键**必须用 `keyboard_shortcut`，不要把 "enter" 当文本输入！
   - 按两次回车：`{{"type":"keyboard_shortcut","params":{{"keys":"enter","repeat":2}}}}`
 - mouse_click: 鼠标点击 → params: {{"x": 100, "y": 200}}
@@ -468,8 +486,15 @@ class DeepSeekPlanner(BasePlanner):
 
 **用户指令**：{instruction}
 
+**重要提示**：
+- 如果用户说"打开XXX然后YYY"或"打开XXX YYY"，XXX是应用名，YYY是后续操作，必须拆分为多个步骤
+- 例如："打开企业微信控制键盘输入zhangxuzheng按空格" → 应该拆分为3个步骤：
+  1. open_app（app_name: "企业微信"）
+  2. keyboard_type（text: "zhangxuzheng"）
+  3. keyboard_shortcut（keys: "space"）
+
 请生成JSON数组格式的执行步骤，每个步骤包含：
-- type: 步骤类型（字符串）
+- type: 步骤类型（字符串，如 open_app、keyboard_type、keyboard_shortcut、execute_python_script 等）
 - action: 操作描述（字符串）
 - params: 参数对象
 - description: 步骤说明（字符串）
@@ -478,6 +503,7 @@ class DeepSeekPlanner(BasePlanner):
 - 只输出JSON数组，不要添加其他文字
 - 如果使用 execute_python_script，script字段必须使用 base64 编码
 - JSON格式必须严格正确，可以被Python的json.loads()解析
+- **理解自然语言**：仔细分析用户指令，正确拆分多个操作
 
 示例（Word文档替换 - 正确的 runs 遍历方式）：
 [

@@ -219,8 +219,8 @@ class OpenAIPlanner(BasePlanner):
 - screenshot_desktop: 截图整个桌面
 - open_file: 用默认应用打开文件（只在用户明确说"打开文件"时使用）
 - open_folder: 在文件管理器中打开文件夹（只在用户明确说"打开文件夹"时使用）
-- open_app: 打开应用程序
-- close_app: 关闭应用程序
+- open_app: 打开应用程序，params: {{"app_name": "应用名称"}}
+- close_app: 关闭应用程序，params: {{"app_name": "应用名称"}}
 - execute_python_script: 执行Python脚本（用于复杂任务或工具无法满足的需求）
 
 **Python脚本执行**（复杂任务或工具无法满足时使用）：

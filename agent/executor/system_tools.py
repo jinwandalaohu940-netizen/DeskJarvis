@@ -1473,7 +1473,7 @@ class SystemTools:
     
     def _keyboard_type(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        模拟键盘输入
+        模拟键盘输入（支持中文、英文、数字、符号）
         
         Args:
             params: 包含 text (要输入的文本)
@@ -1482,10 +1482,36 @@ class SystemTools:
         
         try:
             if sys.platform == "darwin":
-                # 使用 osascript 模拟键盘输入
-                escaped_text = text.replace('"', '\\"').replace("'", "\\'")
-                script = f'tell application "System Events" to keystroke "{escaped_text}"'
-                subprocess.run(["osascript", "-e", script], check=True)
+                # macOS 的 osascript keystroke 支持中文，但需要特殊处理
+                # 方法1：直接使用 keystroke（支持中文）
+                # 对于包含中文的文本，使用剪贴板方式更可靠
+                import re
+                
+                # 检测是否包含中文字符
+                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
+                
+                if has_chinese:
+                    # 方法：使用剪贴板 + Cmd+V（更可靠的中文输入方式）
+                    # 1. 先复制到剪贴板
+                    process = subprocess.Popen(["pbcopy"], stdin=subprocess.PIPE)
+                    process.communicate(text.encode("utf-8"))
+                    process.wait()
+                    
+                    # 2. 等待一下确保复制完成
+                    import time
+                    time.sleep(0.1)
+                    
+                    # 3. 粘贴（Cmd+V）
+                    subprocess.run(
+                        ["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'],
+                        check=True
+                    )
+                else:
+                    # 纯英文/数字/符号，直接使用 keystroke
+                    escaped_text = text.replace('"', '\\"').replace("'", "\\'")
+                    script = f'tell application "System Events" to keystroke "{escaped_text}"'
+                    subprocess.run(["osascript", "-e", script], check=True)
+                
                 return {"success": True, "message": "已输入文本", "data": {"text": text[:30] + "..." if len(text) > 30 else text}}
             else:
                 return {"success": False, "message": "此功能仅支持 macOS", "data": None}

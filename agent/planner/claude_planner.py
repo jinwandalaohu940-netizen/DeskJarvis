@@ -73,13 +73,24 @@ class ClaudePlanner(BasePlanner):
                 )
 
             # 调用Claude API
+            logger.warning(f"🔵 正在调用Claude API规划任务...")
             response = call_llm(prompt)
             content = response.content[0].text if response.content else ""
-            logger.debug(f"Claude响应: {content[:500]}...")
+            logger.warning(f"🔵 Claude原始响应（前2000字符）: {content[:2000]}...")
+            logger.debug(f"Claude完整响应: {content}")
             
             # 解析响应：若 JSON 格式失败，自动重试一次（仅修复输出格式）
             try:
                 steps = self._parse_response(content)
+                logger.warning(f"🔵 解析后的步骤列表: {steps}")
+                
+                # 检查是否有open_app步骤，记录app_name用于调试
+                for i, step in enumerate(steps):
+                    if step.get("type") == "open_app":
+                        app_name = step.get("params", {}).get("app_name", "")
+                        logger.warning(f"🔵 步骤{i+1} open_app的app_name: '{app_name}' (长度: {len(app_name)})")
+                        if len(app_name) > 20 or any(kw in app_name for kw in ["控制", "输入", "搜索", "按"]):
+                            logger.error(f"❌ 检测到可疑的app_name: '{app_name}'，可能包含后续操作！AI没有正确拆分步骤！")
             except Exception as e:
                 logger.warning(f"解析规划结果失败，将重试一次修复输出格式: {e}")
                 retry_prompt = (
@@ -101,6 +112,107 @@ class ClaudePlanner(BasePlanner):
                 steps = self._parse_response(content2)
 
             logger.info(f"规划完成，共 {len(steps)} 个步骤")
+            
+            # 后处理：修复截图工具选择错误
+            user_instruction_lower = user_instruction.lower() if user_instruction else ""
+            
+            # 后处理1：检查是否有浏览器操作，如果有，后续的截图应该用 browser_screenshot 而不是 screenshot_desktop
+            has_browser_operation = False
+            browser_keywords = ["搜索", "打开网页", "访问", "浏览", "导航", "search", "navigate", "open", "visit", "browse"]
+            for keyword in browser_keywords:
+                if keyword in user_instruction:
+                    has_browser_operation = True
+                    break
+            
+            # 检查步骤中是否有浏览器操作
+            for step in steps:
+                step_type = step.get('type', '')
+                if step_type in ['browser_navigate', 'browser_click', 'browser_input', 'browser_screenshot']:
+                    has_browser_operation = True
+                    break
+            
+            # 如果用户指令包含浏览器操作，检查是否有错误的 screenshot_desktop
+            if has_browser_operation:
+                for i, step in enumerate(steps, 1):
+                    step_type = step.get('type')
+                    step_params = step.get('params', {})
+                    
+                    # 如果发现 screenshot_desktop，但前面有浏览器操作，应该改为 browser_screenshot
+                    if step_type == 'screenshot_desktop':
+                        # 检查前面是否有浏览器操作步骤
+                        has_browser_before = False
+                        for j in range(i - 1):
+                            prev_step_type = steps[j].get('type', '')
+                            if prev_step_type in ['browser_navigate', 'browser_click', 'browser_input']:
+                                has_browser_before = True
+                                break
+                        
+                        # 如果前面有浏览器操作，或者用户指令明确包含浏览器操作，应该用 browser_screenshot
+                        if has_browser_before or any(kw in user_instruction for kw in ["搜索", "打开", "访问", "浏览"]):
+                            logger.warning(f"⚠️ 步骤 {i}：检测到浏览器操作后的截图，但使用了 screenshot_desktop，自动改为 browser_screenshot")
+                            step['type'] = 'browser_screenshot'
+                            # 如果 screenshot_desktop 有 save_path，保留它
+                            if 'save_path' not in step_params or not step_params.get('save_path'):
+                                # 检查用户是否要求保存到桌面
+                                if "保存到桌面" in user_instruction or "保存桌面" in user_instruction or ("保存" in user_instruction and "桌面" in user_instruction):
+                                    step_params['save_path'] = "~/Desktop/screenshot.png"
+                                    step['params'] = step_params
+                                    logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
+                            logger.info(f"✅ 已自动将 screenshot_desktop 改为 browser_screenshot")
+            
+            # 后处理2：检查并修复 screenshot_desktop 缺少 save_path 的情况（仅当确实是桌面截图时）
+            for i, step in enumerate(steps, 1):
+                step_type = step.get('type')
+                step_params = step.get('params', {})
+                
+                # 如果是 screenshot_desktop（且不是浏览器操作后的截图），检查用户是否要求保存到桌面
+                if step_type == 'screenshot_desktop':
+                    # 检查用户指令中是否包含"保存到桌面"、"保存桌面"等关键词
+                    has_save_to_desktop = (
+                        "保存到桌面" in user_instruction or
+                        "保存桌面" in user_instruction or
+                        "保存到 ~/Desktop" in user_instruction or
+                        "save to desktop" in user_instruction_lower or
+                        "save desktop" in user_instruction_lower or
+                        ("保存" in user_instruction and "桌面" in user_instruction) or
+                        ("save" in user_instruction_lower and "desktop" in user_instruction_lower)
+                    )
+                    
+                    # 检查是否已经传递了 save_path 参数
+                    has_save_path = 'save_path' in step_params and step_params.get('save_path')
+                    
+                    if has_save_to_desktop and not has_save_path:
+                        logger.warning(f"⚠️ 步骤 {i} screenshot_desktop：用户要求保存到桌面，但未传递save_path参数，自动添加")
+                        step_params['save_path'] = "~/Desktop/screenshot.png"
+                        steps[i-1]['params'] = step_params
+                        logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
+            
+            # 后处理3：检查 browser_screenshot 是否需要添加 save_path
+            for i, step in enumerate(steps, 1):
+                step_type = step.get('type')
+                step_params = step.get('params', {})
+                
+                # 如果是 browser_screenshot，检查用户是否要求保存到桌面
+                if step_type == 'browser_screenshot':
+                    # 检查用户指令中是否包含"保存到桌面"、"保存桌面"等关键词
+                    has_save_to_desktop = (
+                        "保存到桌面" in user_instruction or
+                        "保存桌面" in user_instruction or
+                        "保存到 ~/Desktop" in user_instruction or
+                        "save to desktop" in user_instruction_lower or
+                        "save desktop" in user_instruction_lower or
+                        ("保存" in user_instruction and "桌面" in user_instruction) or
+                        ("save" in user_instruction_lower and "desktop" in user_instruction_lower)
+                    )
+                    
+                    # 检查是否已经传递了 save_path 参数
+                    has_save_path = 'save_path' in step_params and step_params.get('save_path')
+                    
+                    if has_save_to_desktop and not has_save_path:
+                        logger.warning(f"⚠️ 步骤 {i} browser_screenshot：用户要求保存到桌面，但未传递save_path参数，自动添加")
+                        step_params['save_path'] = "~/Desktop/screenshot.png"
+                        steps[i-1]['params'] = step_params
+                        logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
             
             return steps
             
@@ -221,10 +333,23 @@ class ClaudePlanner(BasePlanner):
 - browser_navigate: 访问网页，params: {{url: "..."}}
 - browser_click: 点击元素，params: {{selector: "..."}} 或 {{text: "..."}}
 - browser_input: 输入文本，params: {{selector: "...", text: "..."}}
-- browser_screenshot: 截取当前页面，params: {{}}
+- browser_screenshot: 截取当前浏览器页面，params: {{save_path: "保存路径（可选）"}}
 - download_file: 下载文件（通过浏览器点击下载链接），params: {{selector: "..."}} 或 {{text: "..."}}, 可选 {{save_path: "保存路径/目录"}}, {{timeout: 60000}}
 - request_login: 请求用户登录（弹出登录对话框），params: {{site_name: "网站名", username_selector: "用户名输入框选择器", password_selector: "密码输入框选择器", submit_selector: "提交按钮选择器（可选）"}}
 - request_captcha: 请求验证码（截取验证码图片并弹出输入框），params: {{site_name: "网站名", captcha_image_selector: "验证码图片选择器", captcha_input_selector: "验证码输入框选择器"}}
+
+**重要规则：截图工具选择**
+- **browser_screenshot**：用于截图浏览器中的网页内容
+  - 当用户指令包含"搜索"、"打开网页"、"访问"、"浏览"等浏览器操作，然后说"截图"时，必须使用 browser_screenshot
+  - 示例：用户说"搜索GitHub然后截图" → 使用 browser_screenshot（截图GitHub网页）
+  - 示例：用户说"打开百度截图给我" → 使用 browser_screenshot（截图百度网页）
+- **screenshot_desktop**：用于截图整个桌面（不是浏览器页面）
+  - 只有当用户明确说"截图桌面"、"截图整个屏幕"、"桌面截图"时才使用
+  - 示例：用户说"截图桌面" → 使用 screenshot_desktop
+  - 示例：用户说"截图整个屏幕" → 使用 screenshot_desktop
+- **关键区别**：
+  - "保存到桌面" ≠ "截图桌面"！"保存到桌面"只是指保存路径，不是截图对象
+  - 如果用户先有浏览器操作（如"搜索GitHub"），然后说"截图给我，保存到桌面"，应该用 browser_screenshot + save_path参数，而不是 screenshot_desktop
 """
         
         word_doc_section = ""
@@ -323,14 +448,21 @@ print(json.dumps(result, ensure_ascii=False))
         
         prompt = f"""你是 DeskJarvis，一个智能桌面助手。请用中文思考和输出。
 
+**核心原则**：
+- **理解用户的真实意图**：仔细分析用户的自然语言指令，理解用户想做什么
+- **拆分多个操作**：如果用户指令包含多个操作（如"打开应用然后输入文本"），必须拆分为多个步骤
+- **每个步骤只做一件事**：一个步骤只执行一个操作
+
 ## 你的能力
 {browser_section}
 ### 2. 系统操作
-- screenshot_desktop: 截取桌面，params: {{save_path: "保存路径（可选）"}}
+- screenshot_desktop: 截取整个桌面（不是浏览器页面），params: {{save_path: "保存路径（可选）"}}
+  - **注意**：只有当用户明确要求"截图桌面"、"截图整个屏幕"时才使用此工具
+  - 如果用户先有浏览器操作（如"搜索"、"打开网页"），然后说"截图"，应该使用 browser_screenshot，而不是 screenshot_desktop
 - open_folder: 打开文件夹，params: {{folder_path: "..."}}
 - open_file: 打开文件，params: {{file_path: "..."}}
-- open_app: 打开应用，params: {{app_name: "..."}}
-- close_app: 关闭应用，params: {{app_name: "..."}}
+- open_app: 打开应用，params: {{app_name: "应用名称"}}
+- close_app: 关闭应用，params: {{app_name: "应用名称"}}
 
 ### 2.5 文件操作工具（简单操作可用，复杂操作建议用脚本）
 - file_read: 读取文件，params: {{file_path: "文件路径"}}
@@ -352,7 +484,9 @@ print(json.dumps(result, ensure_ascii=False))
 - keyboard_shortcut: 按键/快捷键（用于回车/Tab/Esc/方向键/⌘C 等），params: {{keys: "command+c"}}, 可选 {{repeat: 2}}（如按两次回车）
 
 **键盘规则（重要！）**：
-- **输入文字**用 `keyboard_type`（例如输入 zhangxuzheng）
+- **输入文字**用 `keyboard_type`（支持中文、英文、数字、符号）
+  - 示例：输入"张旭政" → `{{"type":"keyboard_type","params":{{"text":"张旭政"}}}}`
+  - 示例：输入"zhangxuzheng" → `{{"type":"keyboard_type","params":{{"text":"zhangxuzheng"}}}}`
 - **按回车/Tab/Esc/方向键**必须用 `keyboard_shortcut`，不要把 "enter" 当文本输入！
   - 按两次回车：`{{"type":"keyboard_shortcut","params":{{"keys":"enter","repeat":2}}}}`
 - mouse_click: 鼠标点击，params: {{x: 100, y: 200}}
@@ -515,6 +649,7 @@ print(json.dumps(result, ensure_ascii=False))
 ## 任务
 {instruction}
 {context_str}
+
 ## 文件名理解规则
 
 当用户提到文件名时：
@@ -535,13 +670,20 @@ print(json.dumps(result, ensure_ascii=False))
 ```json
 [
   {{
-    "type": "步骤类型（如 execute_python_script、screenshot_desktop、open_folder 等）",
-    "action": "简短操作描述（中文，如：批量重命名图片）",
-  "params": {{}},
+    "type": "步骤类型（如 open_app、keyboard_type、keyboard_shortcut、execute_python_script、screenshot_desktop、open_folder 等）",
+    "action": "简短操作描述（中文，如：打开企业微信）",
+    "params": {{}},
     "description": "给用户看的详细描述（中文）"
   }}
 ]
 ```
+
+**重要提示**：
+- 如果用户说"打开XXX然后YYY"或"打开XXX YYY"，XXX是应用名，YYY是后续操作，必须拆分为多个步骤
+- 例如："打开企业微信控制键盘输入zhangxuzheng按空格" → 应该拆分为3个步骤：
+  1. open_app（app_name: "企业微信"）
+  2. keyboard_type（text: "zhangxuzheng"）
+  3. keyboard_shortcut（keys: "space"）
 
 ## 重要规则
 
@@ -550,6 +692,7 @@ print(json.dumps(result, ensure_ascii=False))
 3. **中文描述**：所有 description 和 action 使用中文
 4. **路径处理**：使用 Path 对象处理路径，支持 ~ 和中文路径
 5. **只返回 JSON 数组**：不要有任何其他解释文字
+6. **理解自然语言**：仔细分析用户指令，正确拆分多个操作
 
 现在请规划任务："""
         
