@@ -10,6 +10,7 @@
 import json
 import logging
 import hashlib
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -38,9 +39,13 @@ class VectorMemory:
         self.enabled = False
         self._chromadb = None
         self._SentenceTransformer = None
+        self.model = None
+        self._model_ready = threading.Event()
+        self._model_load_error: Optional[Exception] = None
 
         ok = self._ensure_dependencies(auto_install=auto_install)
         if not ok:
+            self._model_ready.set()  # 无模型可加载，直接标记完成
             return
         
         self.enabled = True
@@ -51,27 +56,26 @@ class VectorMemory:
         self.db_path = db_path
         self.db_path.mkdir(parents=True, exist_ok=True)
         
-        # 初始化嵌入模型
-        logger.info(f"加载嵌入模型: {model_name}")
-        # mypy/类型：运行时注入
-        try:
-            self.model = self._SentenceTransformer(model_name)  # type: ignore[misc]
-        except Exception as e:
-            # sentence-transformers 首次加载可能下载模型；这里失败不应导致整个 Agent 崩溃
-            logger.error(f"嵌入模型加载失败，向量记忆功能禁用: {e}", exc_info=True)
-            self.enabled = False
-            return
+        # ========== 异步加载嵌入模型（方案3：不阻塞主线程） ==========
+        self._model_name = model_name
+        load_thread = threading.Thread(
+            target=self._load_model_background,
+            name="VectorMemory-ModelLoader",
+            daemon=True,
+        )
+        load_thread.start()
         
-        # 初始化 Chroma（使用新的持久化 API）
+        # 初始化 Chroma（不依赖嵌入模型，可并行）
         self.client = self._init_chroma_client()
         if self.client is None:
             logger.error("Chroma 客户端不可用，向量记忆功能禁用")
             self.enabled = False
+            self._model_ready.set()
             return
         
         # 创建集合
         self._init_collections()
-        logger.info(f"向量记忆已初始化: {self.db_path}")
+        logger.info(f"向量记忆已初始化（嵌入模型在后台加载中）: {self.db_path}")
 
     def _init_chroma_client(self):
         """
@@ -263,9 +267,34 @@ class VectorMemory:
         """生成唯一ID"""
         return hashlib.md5(f"{text}{time.time()}".encode()).hexdigest()[:16]
     
+    def _load_model_background(self) -> None:
+        """后台线程：加载 sentence-transformers 嵌入模型"""
+        try:
+            logger.info("[后台] 开始加载嵌入模型: " + str(self._model_name))
+            start = time.time()
+            self.model = self._SentenceTransformer(self._model_name)  # type: ignore[misc]
+            elapsed = time.time() - start
+            logger.info("[后台] 嵌入模型加载完成，耗时 %.1fs" % elapsed)
+        except Exception as e:
+            self._model_load_error = e
+            logger.error("[后台] 嵌入模型加载失败，向量搜索将不可用: " + str(e))
+        finally:
+            self._model_ready.set()
+
     def _embed(self, text: str) -> List[float]:
-        """生成文本嵌入"""
+        """
+        生成文本嵌入。
+        
+        如果模型尚未加载完成，最多等待 60 秒。
+        如果加载失败或超时，返回空列表（调用方应据此跳过向量操作）。
+        """
         if not self.enabled:
+            return []
+        # 等待模型就绪（非阻塞主流程的异步加载）
+        if not self._model_ready.wait(timeout=60):
+            logger.warning("嵌入模型加载超时(60s)，跳过本次向量操作")
+            return []
+        if self._model_load_error is not None or self.model is None:
             return []
         return self.model.encode(text).tolist()
     
@@ -297,6 +326,8 @@ class VectorMemory:
         # 组合文本用于嵌入
         combined_text = f"用户: {user_message}\n回复: {assistant_response[:500]}"
         embedding = self._embed(combined_text)
+        if not embedding:
+            return  # 模型未就绪，静默跳过
         
         doc_id = self._generate_id(user_message)
         
@@ -340,6 +371,8 @@ class VectorMemory:
             return []
         
         query_embedding = self._embed(query)
+        if not query_embedding:
+            return []  # 模型未就绪
         
         where_filter = None
         if filter_success is not None:
@@ -389,9 +422,11 @@ class VectorMemory:
             return
         
         embedding = self._embed(instruction)
+        if not embedding:
+            return  # 模型未就绪，静默跳过
         doc_id = self._generate_id(instruction)
         
-        # 注意：之前对 steps_json 做字符串截断会产生“非法 JSON”，
+        # 注意：之前对 steps_json 做字符串截断会产生"非法 JSON"，
         # 后续读取时 json.loads 会触发 JSONDecodeError（例如 Unterminated string...），从而让主流程直接失败。
         # 这里改为存储 compact steps（字段子集 + 数量限制），保证永远是合法 JSON，且 metadata 大小可控。
         compact_steps: List[Dict[str, str]] = []
@@ -445,6 +480,8 @@ class VectorMemory:
             return []
         
         query_embedding = self._embed(instruction)
+        if not query_embedding:
+            return []  # 模型未就绪
         
         results = self.instructions.query(
             query_embeddings=[query_embedding],
@@ -558,6 +595,8 @@ class VectorMemory:
             
             # 存储摘要
             embedding = self._embed(summary)
+            if not embedding:
+                continue  # 模型未就绪，跳过此组
             summary_id = self._generate_id(date_key)
             
             self.summaries.add(
@@ -582,6 +621,8 @@ class VectorMemory:
             return []
         
         query_embedding = self._embed(query)
+        if not query_embedding:
+            return []  # 模型未就绪
         
         results = self.summaries.query(
             query_embeddings=[query_embedding],

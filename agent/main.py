@@ -70,8 +70,10 @@ class DeskJarvisAgent:
         # BrowserExecutor 需要 emit_callback，在 execute 方法中设置
         self.browser_executor = None
         
-        # 初始化记忆系统
-        self.memory = MemoryManager()
+        # ========== 方案1: 记忆系统懒加载 ==========
+        # 不在 __init__ 中初始化，首次访问 self.memory 时才初始化
+        # 快速通道（翻译/截图等）完全跳过记忆系统，节省 15-20s
+        self._memory: Optional[MemoryManager] = None
         
         # 初始化多代理协作管理器（如果可用）
         self.crew_manager = None
@@ -90,7 +92,22 @@ class DeskJarvisAgent:
                 self.use_crew = False
         
         mode = "多代理协作" if self.use_crew else "单代理"
-        logger.info(f"DeskJarvis Agent已初始化，使用{config.provider}规划器，{mode}模式，记忆系统已启用")
+        logger.info(f"DeskJarvis Agent已初始化，使用{config.provider}规划器，{mode}模式，记忆系统懒加载")
+    
+    @property
+    def memory(self) -> MemoryManager:
+        """
+        懒加载记忆管理器。
+        
+        首次访问时才初始化（~0.1s SQLite + Chroma，嵌入模型在后台异步加载）。
+        快速通道任务永远不会触发此属性。
+        """
+        if self._memory is None:
+            logger.info("首次访问记忆系统，正在初始化...")
+            start = time.time()
+            self._memory = MemoryManager()
+            logger.info("记忆系统初始化完成，耗时 %.1fs" % (time.time() - start))
+        return self._memory
     
     def execute(
         self, 
@@ -375,18 +392,12 @@ class DeskJarvisAgent:
         duration = time.time() - start_time
         step_result = {"step": step, "result": result}
         
-        # 保存记忆
-        try:
-            self.memory.save_task_result(
-                instruction=instruction,
-                steps=[step],
-                result={"success": result.get("success", False), "message": result.get("message", "")},
-                success=result.get("success", False),
-                duration=duration,
-                files_involved=[],
-            )
-        except Exception as mem_err:
-            logger.warning("保存快速通道记忆失败: " + str(mem_err))
+        # ⚠️ 快速通道任务完全跳过记忆保存，保持"快速"特性
+        # 原因：
+        # 1. 快速通道任务（翻译/截图等）通常是简单、重复的操作，不需要记忆
+        # 2. 记忆保存（特别是向量嵌入）会显著拖慢速度（10-30秒）
+        # 3. 如果用户需要记忆，应该走完整的规划流程
+        # 如果未来需要为快速通道任务保存记忆，应该使用异步方式，不阻塞返回
         
         return {
             "success": result.get("success", False),

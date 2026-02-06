@@ -581,18 +581,17 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     addLog("warning", "任务已取消");
     
     // 更新AI消息，显示任务已取消
-    if (currentAssistantMessageIdRef.current) {
+    const stopTargetId = currentAssistantMessageIdRef.current;
+    currentAssistantMessageIdRef.current = null; // 提前清除
+    if (stopTargetId) {
       setMessages((prev) =>
         prev.map((msg) =>
-          msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant"
+          msg.id === stopTargetId && msg.role === "assistant"
             ? { ...msg, content: "任务已取消" }
             : msg
         )
       );
     }
-    
-    // 重置引用
-    currentAssistantMessageIdRef.current = null;
   };
 
   const handleSend = async () => {
@@ -996,13 +995,19 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       const finalMessageContent = messageContent?.trim() || (result.success ? "任务执行完成" : "任务执行失败");
       log.debug("📝 [handleSend] 准备更新最终消息，内容长度:", finalMessageContent.length);
       
+      // ⚠️ 关键：在调用 setMessages 之前捕获当前 ref 值。
+      // React 18 自动批处理会延迟执行 setMessages 回调，
+      // 如果在回调执行时 ref 已被置为 null，则无法匹配到目标消息。
+      const targetMessageId = currentAssistantMessageIdRef.current;
+      currentAssistantMessageIdRef.current = null; // 提前清除，避免后续误用
+      
       setMessages((prev) => {
         // 确保能找到AI消息并更新
         const hasAssistantMessage = prev.some(
-          (msg) => msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant"
+          (msg) => msg.id === targetMessageId && msg.role === "assistant"
         );
         
-        if (!hasAssistantMessage && currentAssistantMessageIdRef.current) {
+        if (!hasAssistantMessage && targetMessageId) {
           // 如果找不到临时消息，直接添加新消息
           log.warn("⚠️ [handleSend] 未找到临时AI消息，直接添加最终消息");
           return [
@@ -1019,7 +1024,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         }
         
         const updated = prev.map((msg) => {
-          if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
+          if (msg.id === targetMessageId && msg.role === "assistant") {
             log.debug("✅ [handleSend] 找到并更新AI消息");
             return {
               ...msg,
@@ -1040,7 +1045,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
         
         return updated;
       });
-      currentAssistantMessageIdRef.current = null; // 清除引用
       
       // 保存任务上下文（用于下次任务理解"这个文件"等引用）
       if (result.steps && result.steps.length > 0) {
@@ -1139,10 +1143,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       addLog("error", `执行失败: ${errorMsg}`);
       
       // ✅ 更新AI消息为错误信息
-      if (currentAssistantMessageIdRef.current) {
+      const errorTargetId = currentAssistantMessageIdRef.current;
+      currentAssistantMessageIdRef.current = null; // 提前清除
+      if (errorTargetId) {
         setMessages((prev) => {
           return prev.map((msg) => {
-            if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
+            if (msg.id === errorTargetId && msg.role === "assistant") {
               return {
                 ...msg,
                 content: `执行失败: ${errorMsg}`,
@@ -1151,7 +1157,6 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             return msg;
           });
         });
-        currentAssistantMessageIdRef.current = null;
       } else {
         // 只有在没有现有消息可更新时才创建新消息
         const errorMessage: ChatMessage = {
@@ -1196,7 +1201,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
   // 简化的消息更新函数（不使用打字机效果，直接更新）
   const updateAssistantMessage = (content: string, append: boolean = false) => {
-    if (!currentAssistantMessageIdRef.current) return;
+    const msgId = currentAssistantMessageIdRef.current;
+    if (!msgId) return;
     
     if (append) {
       // 追加模式：在现有内容后追加
@@ -1212,7 +1218,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
     
     setMessages((prev) => {
       return prev.map((msg) => {
-            if (msg.id === currentAssistantMessageIdRef.current && msg.role === "assistant") {
+            if (msg.id === msgId && msg.role === "assistant") {
               return { ...msg, content: newContent };
             }
             return msg;
