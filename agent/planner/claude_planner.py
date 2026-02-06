@@ -357,6 +357,7 @@ print(json.dumps(result, ensure_ascii=False))
 
 **脚本示例（Word文档文字替换）**：
 **警告：.docx 是 ZIP 压缩包，绝对禁止用 open() 读取！必须用 python-docx 库！**
+**重要：必须遍历 runs 而不是直接修改 para.text，否则可能替换失败！**
     ```python
 import json
 from pathlib import Path
@@ -379,17 +380,24 @@ if not file_path.exists():
 doc = Document(file_path)
 count = 0
 
+# 正确方式：遍历 runs（Word 可能把一个词拆成多个 run）
 for para in doc.paragraphs:
-    if old_text in para.text:
-        para.text = para.text.replace(old_text, new_text)
-        count += 1
+    if old_text in para.text:  # 先检查整段
+        for run in para.runs:  # 再遍历每个 run
+            if old_text in run.text:
+                run.text = run.text.replace(old_text, new_text)
+                count += 1
 
+# 表格也要遍历 runs
 for table in doc.tables:
     for row in table.rows:
         for cell in row.cells:
             if old_text in cell.text:
-                cell.text = cell.text.replace(old_text, new_text)
-                count += 1
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        if old_text in run.text:
+                            run.text = run.text.replace(old_text, new_text)
+                            count += 1
 
 doc.save(file_path)
 result = {{"success": True, "message": "替换完成，共替换 " + str(count) + " 处"}}

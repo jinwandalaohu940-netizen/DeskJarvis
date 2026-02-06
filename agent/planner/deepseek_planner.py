@@ -276,6 +276,19 @@ class DeepSeekPlanner(BasePlanner):
     - **必须使用 python-docx 库**：`from docx import Document`
     - **绝对禁止用 open() 读取 .docx 文件**！.docx 是 ZIP 压缩包，不是文本文件，用 open() 会报 UnicodeDecodeError
     - 正确方式：`doc = Document(file_path)` → 遍历 `doc.paragraphs` 和 `doc.tables`
+    - **替换文字的正确方法（极其重要！）**：
+      * Word 文档中，一段文字可能被拆分成多个 run（格式块）
+      * **错误方式**：`para.text = para.text.replace(old, new)` - 这会丢失格式且可能替换失败
+      * **正确方式**：遍历每个 run，在 run.text 中替换
+      ```python
+      for para in doc.paragraphs:
+          if old_text in para.text:  # 先检查整段是否包含目标文字
+              for run in para.runs:
+                  if old_text in run.text:  # 再在 run 中替换
+                      run.text = run.text.replace(old_text, new_text)
+                      count += 1
+      ```
+      * 同样处理表格：`for table in doc.tables: for row in table.rows: for cell in row.cells: ...`
   * **文件路径**：脚本中应该**直接使用文件路径**（硬编码），不要从环境变量读取。使用 `os.path.expanduser()` 或 `pathlib.Path.home()` 处理 `~` 符号。例如：`file_path = os.path.expanduser("~/Desktop/file.docx")`
   * **重要**：文件路径**不要进行 URL 编码**（不要使用 `urllib.parse.quote()` 或类似函数），直接使用原始的中文文件名。例如：`"~/Desktop/强制执行申请书.docx"` 而不是 `"~/Desktop/%E5%BC%BA%E5%88%B6%E6%89%A7%E8%A1%8C%E7%94%B3%E8%AF%B7%E4%B9%A6.docx"`
   * **文件名必须准确**：必须使用用户指令中提到的**完整准确的文件名**，不要随意更改、替换或编码文件名。
@@ -335,17 +348,17 @@ class DeepSeekPlanner(BasePlanner):
 - 如果使用 execute_python_script，script字段必须使用 base64 编码
 - JSON格式必须严格正确，可以被Python的json.loads()解析
 
-示例（Word文档替换）：
+示例（Word文档替换 - 正确的 runs 遍历方式）：
 [
   {{
     "type": "execute_python_script",
     "action": "替换Word文档中的文字",
     "params": {{
-      "script": "aW1wb3J0IGpzb24KaW1wb3J0IG9zCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKdHJ5OgogICAgZnJvbSBkb2N4IGltcG9ydCBEb2N1bWVudApleGNlcHQgSW1wb3J0RXJyb3I6CiAgICBwcmludChqc29uLmR1bXBzKHsic3VjY2VzcyI6IEZhbHNlLCAibWVzc2FnZSI6ICLpnIDopoHlronoo4UgcHl0aG9uLWRvY3g6IHBpcCBpbnN0YWxsIHB5dGhvbi1kb2N4In0pKQogICAgZXhpdCgwKQoKIyDmkJzntKLmlofku7YKZGVza3RvcCA9IFBhdGguaG9tZSgpIC8gIkRlc2t0b3AiCmtleXdvcmQgPSAi5by65Yi25omn6KGMIgpvbGRfdGV4dCA9ICLlvKDmlofnpYQiCm5ld190ZXh0ID0gIuW8oOaXreaUvyIKCm1hdGNoZXMgPSBbZiBmb3IgZiBpbiBkZXNrdG9wLml0ZXJkaXIoKSBpZiBmLmlzX2ZpbGUoKSBhbmQga2V5d29yZCBpbiBmLm5hbWUgYW5kIGYuc3VmZml4ID09ICIuZG9jeCJdCgppZiBub3QgbWF0Y2hlczoKICAgIHByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogRmFsc2UsICJtZXNzYWdlIjogIuacquaJvuWIsOWMheWQqyciICsga2V5d29yZCArICIn55qEV29yZOaWh+ahoyJ9KSkKICAgIGV4aXQoMCkKCmZpbGVfcGF0aCA9IG1hdGNoZXNbMF0KZG9jID0gRG9jdW1lbnQoZmlsZV9wYXRoKQpjb3VudCA9IDAKCmZvciBwYXJhIGluIGRvYy5wYXJhZ3JhcGhzOgogICAgaWYgb2xkX3RleHQgaW4gcGFyYS50ZXh0OgogICAgICAgIHBhcmEudGV4dCA9IHBhcmEudGV4dC5yZXBsYWNlKG9sZF90ZXh0LCBuZXdfdGV4dCkKICAgICAgICBjb3VudCArPSAxCgpkb2Muc2F2ZShmaWxlX3BhdGgpCnByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogVHJ1ZSwgIm1lc3NhZ2UiOiAi5pu/5o2i5a6M5oiQ77yM5YWx5pu/5o2iICIgKyBzdHIoY291bnQpICsgIiDlpIQifSkpCg==",
-      "reason": "Word文档替换需要使用python-docx库",
+      "script": "aW1wb3J0IGpzb24KaW1wb3J0IG9zCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKdHJ5OgogICAgZnJvbSBkb2N4IGltcG9ydCBEb2N1bWVudApleGNlcHQgSW1wb3J0RXJyb3I6CiAgICBwcmludChqc29uLmR1bXBzKHsic3VjY2VzcyI6IEZhbHNlLCAibWVzc2FnZSI6ICLpnIDopoHlronoo4UgcHl0aG9uLWRvY3g6IHBpcCBpbnN0YWxsIHB5dGhvbi1kb2N4In0pKQogICAgZXhpdCgwKQoKIyDmkJzntKLmlofku7YKZGVza3RvcCA9IFBhdGguaG9tZSgpIC8gIkRlc2t0b3AiCmtleXdvcmQgPSAi5by65Yi25omn6KGMIgpvbGRfdGV4dCA9ICLlvKDmlofnpoQiCm5ld190ZXh0ID0gIuW8oOaXreaUvyIKCm1hdGNoZXMgPSBbZiBmb3IgZiBpbiBkZXNrdG9wLml0ZXJkaXIoKSBpZiBmLmlzX2ZpbGUoKSBhbmQga2V5d29yZCBpbiBmLm5hbWUgYW5kIGYuc3VmZml4ID09ICIuZG9jeCJdCgppZiBub3QgbWF0Y2hlczoKICAgIHByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogRmFsc2UsICJtZXNzYWdlIjogIuacquaJvuWIsOWMheWQqyciICsga2V5d29yZCArICIn55qEV29yZOaWh+ahoyJ9KSkKICAgIGV4aXQoMCkKCmZpbGVfcGF0aCA9IG1hdGNoZXNbMF0KZG9jID0gRG9jdW1lbnQoZmlsZV9wYXRoKQpjb3VudCA9IDAKCiMg5q2j56Gu55qE5pu/5o2i5pa55rOV77ya6YGN5Y6GIHJ1bnMKZm9yIHBhcmEgaW4gZG9jLnBhcmFncmFwaHM6CiAgICBpZiBvbGRfdGV4dCBpbiBwYXJhLnRleHQ6CiAgICAgICAgZm9yIHJ1biBpbiBwYXJhLnJ1bnM6CiAgICAgICAgICAgIGlmIG9sZF90ZXh0IGluIHJ1bi50ZXh0OgogICAgICAgICAgICAgICAgcnVuLnRleHQgPSBydW4udGV4dC5yZXBsYWNlKG9sZF90ZXh0LCBuZXdfdGV4dCkKICAgICAgICAgICAgICAgIGNvdW50ICs9IDEKCiMg5Lmf5qOA5p+l6KGo5qC8CmZvciB0YWJsZSBpbiBkb2MudGFibGVzOgogICAgZm9yIHJvdyBpbiB0YWJsZS5yb3dzOgogICAgICAgIGZvciBjZWxsIGluIHJvdy5jZWxsczoKICAgICAgICAgICAgaWYgb2xkX3RleHQgaW4gY2VsbC50ZXh0OgogICAgICAgICAgICAgICAgZm9yIHBhcmEgaW4gY2VsbC5wYXJhZ3JhcGhzOgogICAgICAgICAgICAgICAgICAgIGZvciBydW4gaW4gcGFyYS5ydW5zOgogICAgICAgICAgICAgICAgICAgICAgICBpZiBvbGRfdGV4dCBpbiBydW4udGV4dDoKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJ1bi50ZXh0ID0gcnVuLnRleHQucmVwbGFjZShvbGRfdGV4dCwgbmV3X3RleHQpCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb3VudCArPSAxCgpkb2Muc2F2ZShmaWxlX3BhdGgpCnByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogVHJ1ZSwgIm1lc3NhZ2UiOiAi5pu/5o2i5a6M5oiQ77yM5YWx5pu/5o2iICIgKyBzdHIoY291bnQpICsgIiDlpIQifSkpCg==",
+      "reason": "Word文档替换需要使用python-docx库，必须遍历runs",
       "safety": "只操作桌面文件，使用try-except"
     }},
-    "description": "搜索并替换Word文档中的文字"
+    "description": "搜索并替换Word文档中的文字（遍历runs方式）"
   }}
 ]
 
