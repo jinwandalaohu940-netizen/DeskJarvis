@@ -253,32 +253,65 @@ class CodeInterpreter:
             解码后的脚本内容
         """
         import base64
+        import binascii
         import string
-        
-        # 首先尝试 base64 解码
-        try:
-            # 移除空白字符
-            script_clean = ''.join(script.split())
-            
-            # 修复 padding
-            missing_padding = len(script_clean) % 4
-            if missing_padding:
-                script_clean += '=' * (4 - missing_padding)
-            
-            # 尝试解码
-            decoded_bytes = base64.b64decode(script_clean, validate=True)
-            decoded_str = decoded_bytes.decode("utf-8")
-            
-            # 验证解码后的内容看起来像 Python 代码
-            if decoded_str.strip().startswith(('import ', 'from ', 'def ', 'class ', 'try:', 'if ', 'print(', '#', '"""')):
-                logger.info("检测到 base64 编码的脚本，已解码")
-                script = decoded_str
+
+        if not isinstance(script, str):
+            return str(script)
+
+        # 如果已经像 Python 源码（最常见），直接做基础反转义即可
+        if script.lstrip().startswith(("import ", "from ", "def ", "class ", "try:", "if ", "print(", "#", '"""')):
+            script = script.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+        else:
+            # 尝试 base64 解码（容错：自动补齐 padding；兼容 urlsafe）
+            script_clean = "".join(script.split())
+
+            # 仅当“看起来像 base64”时才尝试解码，避免误判
+            base64_chars = set(string.ascii_letters + string.digits + "+/=_-")
+            looks_like_base64 = len(script_clean) >= 64 and all(c in base64_chars for c in script_clean)
+
+            if looks_like_base64:
+                # 修复 padding（很多模型会漏掉末尾 '='）
+                missing_padding = len(script_clean) % 4
+                if missing_padding:
+                    script_clean += "=" * (4 - missing_padding)
+
+                decoded_str = None
+
+                # 1) 严格 base64
+                try:
+                    decoded_bytes = base64.b64decode(script_clean, validate=True)
+                    decoded_str = decoded_bytes.decode("utf-8", errors="strict")
+                except (binascii.Error, UnicodeDecodeError, ValueError):
+                    decoded_str = None
+
+                # 2) 非严格 base64（更兼容）
+                if decoded_str is None:
+                    try:
+                        decoded_bytes = base64.b64decode(script_clean, validate=False)
+                        decoded_str = decoded_bytes.decode("utf-8", errors="strict")
+                    except Exception:
+                        decoded_str = None
+
+                # 3) urlsafe base64
+                if decoded_str is None:
+                    try:
+                        decoded_bytes = base64.urlsafe_b64decode(script_clean)
+                        decoded_str = decoded_bytes.decode("utf-8", errors="strict")
+                    except Exception:
+                        decoded_str = None
+
+                if decoded_str is not None and decoded_str.strip().startswith(
+                    ("import ", "from ", "def ", "class ", "try:", "if ", "print(", "#", '"""')
+                ):
+                    logger.info("检测到 base64 编码的脚本，已解码（含 urlsafe/padding 容错）")
+                    script = decoded_str
+                else:
+                    # 解码失败或解码后不像 Python：按普通字符串处理
+                    script = script.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
             else:
-                # 解码成功但不像 Python 代码，可能不是 base64
-                pass
-        except Exception:
-            # base64 解码失败，说明是普通字符串
-            script = script.replace("\\n", "\n")
+                # 不是 base64：按普通字符串处理
+                script = script.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
         
         # 清理控制字符（保留换行、制表符、回车）
         allowed_control_chars = {'\n', '\r', '\t'}
