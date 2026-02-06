@@ -217,7 +217,12 @@ class ClaudePlanner(BasePlanner):
 - clipboard_read: 读取剪贴板，params: {{}}
 - clipboard_write: 写入剪贴板，params: {{content: "内容"}}
 - keyboard_type: 键盘输入，params: {{text: "要输入的文本"}}
-- keyboard_shortcut: 快捷键，params: {{keys: "command+c"}}
+- keyboard_shortcut: 按键/快捷键（用于回车/Tab/Esc/方向键/⌘C 等），params: {{keys: "command+c"}}, 可选 {{repeat: 2}}（如按两次回车）
+
+**键盘规则（重要！）**：
+- **输入文字**用 `keyboard_type`（例如输入 zhangxuzheng）
+- **按回车/Tab/Esc/方向键**必须用 `keyboard_shortcut`，不要把 "enter" 当文本输入！
+  - 按两次回车：`{{"type":"keyboard_shortcut","params":{{"keys":"enter","repeat":2}}}}`
 - mouse_click: 鼠标点击，params: {{x: 100, y: 200}}
 - window_minimize: 最小化窗口，params: {{app_name: "应用名（可选）"}}
 - window_maximize: 最大化窗口，params: {{app_name: "应用名（可选）"}}

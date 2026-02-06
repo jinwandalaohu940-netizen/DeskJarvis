@@ -1497,9 +1497,13 @@ class SystemTools:
         发送键盘快捷键
         
         Args:
-            params: 包含 keys (如 "command+c", "command+shift+s")
+            params: 包含 keys (如 "command+c", "command+shift+s", "enter", "tab")
+                - repeat: 重复次数（可选，默认 1）
+                - delay_ms: 每次按键间延迟毫秒（可选，默认 80）
         """
         keys = params.get("keys", "")
+        repeat = int(params.get("repeat", 1) or 1)
+        delay_ms = int(params.get("delay_ms", 80) or 80)
         
         try:
             if sys.platform == "darwin":
@@ -1519,14 +1523,49 @@ class SystemTools:
                         modifiers.append("shift down")
                 
                 modifier_str = ", ".join(modifiers) if modifiers else ""
-                
-                if modifier_str:
-                    script = f'tell application "System Events" to keystroke "{key}" using {{{modifier_str}}}'
-                else:
-                    script = f'tell application "System Events" to keystroke "{key}"'
-                
-                subprocess.run(["osascript", "-e", script], check=True)
-                return {"success": True, "message": "已发送快捷键: " + keys, "data": {"keys": keys}}
+
+                # 特殊按键映射：这些不能用 keystroke "enter"（会打出字母），必须用 key code
+                special_key_codes = {
+                    "enter": 36,
+                    "return": 36,
+                    "tab": 48,
+                    "esc": 53,
+                    "escape": 53,
+                    "delete": 51,          # backspace
+                    "backspace": 51,
+                    "forwarddelete": 117,  # fn+delete
+                    "space": 49,
+                    "left": 123,
+                    "right": 124,
+                    "down": 125,
+                    "up": 126,
+                }
+
+                def build_applescript() -> str:
+                    # 优先识别特殊键
+                    if key in special_key_codes:
+                        code = special_key_codes[key]
+                        if modifier_str:
+                            return f'tell application "System Events" to key code {code} using {{{modifier_str}}}'
+                        return f'tell application "System Events" to key code {code}'
+
+                    # 普通字符（含字母、数字、符号）
+                    if modifier_str:
+                        return f'tell application "System Events" to keystroke "{key}" using {{{modifier_str}}}'
+                    return f'tell application "System Events" to keystroke "{key}"'
+
+                script_once = build_applescript()
+                # repeat 次执行（避免在 AppleScript 内拼 repeat，保持简单可靠）
+                for _ in range(max(1, repeat)):
+                    subprocess.run(["osascript", "-e", script_once], check=True)
+                    if delay_ms > 0:
+                        time.sleep(delay_ms / 1000.0)
+
+                return {
+                    "success": True,
+                    "message": "已发送按键: " + keys + (" ×" + str(repeat) if repeat > 1 else ""),
+                    "data": {"keys": keys, "repeat": repeat},
+                }
             else:
                 return {"success": False, "message": "此功能仅支持 macOS", "data": None}
         except Exception as e:
