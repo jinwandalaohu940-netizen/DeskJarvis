@@ -179,6 +179,7 @@ class CodeInterpreter:
                 enhanced_code = self._try_fix_error(enhanced_code, last_error)
 
             # 3.5 执行前验证（lint/契约/dry-run）
+            self._emit_progress("validating_script", "正在检查脚本质量（ruff + dry-run）…")
             validation = self.validator.validate(
                 enhanced_code,
                 lint=True,
@@ -190,6 +191,7 @@ class CodeInterpreter:
                 last_error = "脚本验证失败: " + validation.message
                 if validation.details:
                     last_error = last_error + "\n" + validation.details
+                self._emit_progress("validation_failed", validation.message)
                 # 还有重试机会就继续（让 _try_fix_error 有机会修）
                 if attempt < max_retries:
                     continue

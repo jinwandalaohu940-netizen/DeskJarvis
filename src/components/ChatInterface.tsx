@@ -1413,6 +1413,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
       case "installing_packages":
       case "installing":
       case "retrying":
+      case "validating_script":
+      case "validation_failed":
         if (eventData.message) {
           pushLiveNotice(String(eventData.message), "executing");
           addLog("info", String(eventData.message));
