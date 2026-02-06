@@ -64,22 +64,60 @@ class DeepSeekPlanner(BasePlanner):
         """
         try:
             prompt = self._build_prompt(user_instruction, context)
-            
             logger.info("开始规划任务...")
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "你是一个AI任务规划助手。请理解用户的自然语言指令，生成可执行的任务步骤。只返回JSON数组，不要添加其他文字。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=4000
-            )
-            
-            content = response.choices[0].message.content
+
+            def call_llm(messages):
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=4000,
+                )
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": "你是一个AI任务规划助手。请理解用户的自然语言指令，生成可执行的任务步骤。只返回JSON数组，不要添加其他文字。",
+                },
+                {"role": "user", "content": prompt},
+            ]
+
+            response = call_llm(messages)
+            content = response.choices[0].message.content or ""
             logger.debug(f"AI响应: {content[:500]}...")
-            
-            steps = self._parse_response(content)
+
+            # 解析响应：若 JSON 格式失败，自动重试一次（仅修复输出格式）
+            try:
+                steps = self._parse_response(content)
+            except Exception as e:
+                logger.warning(f"解析规划结果失败，将重试一次修复输出格式: {e}")
+                retry_messages = [
+                    {
+                        "role": "system",
+                        "content": "你是一个严格的JSON生成器。你只允许输出一个JSON数组（[]），不得包含任何其他字符。",
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一次输出不是合法JSON，解析失败。\n"
+                            "错误信息:\n"
+                            + str(e)
+                            + "\n\n"
+                            "上一次原始输出（可能被截断）:\n"
+                            + content[:1500]
+                            + "\n\n"
+                            "请重新输出合法JSON数组。规则：\n"
+                            "- 只输出 JSON 数组（以 [ 开头，以 ] 结尾）\n"
+                            "- 所有字符串必须使用双引号，且字符串内换行必须写成 \\n\n"
+                            "- 不要输出 markdown 代码块\n"
+                        ),
+                    },
+                ]
+                response2 = call_llm(retry_messages)
+                content2 = response2.choices[0].message.content or ""
+                logger.debug(f"AI重试响应: {content2[:500]}...")
+                steps = self._parse_response(content2)
+
             logger.info(f"规划完成，共 {len(steps)} 个步骤")
             
             # 保存用户指令，用于后处理检查

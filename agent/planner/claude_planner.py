@@ -65,18 +65,41 @@ class ClaudePlanner(BasePlanner):
             # 构建提示词
             prompt = self._build_prompt(user_instruction, context)
             
+            def call_llm(user_prompt: str):
+                return self.client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+
             # 调用Claude API
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            
-            content = response.content[0].text
+            response = call_llm(prompt)
+            content = response.content[0].text if response.content else ""
             logger.debug(f"Claude响应: {content[:500]}...")
             
-            # 解析响应
-            steps = self._parse_response(content)
+            # 解析响应：若 JSON 格式失败，自动重试一次（仅修复输出格式）
+            try:
+                steps = self._parse_response(content)
+            except Exception as e:
+                logger.warning(f"解析规划结果失败，将重试一次修复输出格式: {e}")
+                retry_prompt = (
+                    "你上一次的输出不是合法JSON，解析失败。\n"
+                    "错误信息:\n"
+                    + str(e)
+                    + "\n\n"
+                    "上一次原始输出（可能被截断）:\n"
+                    + content[:1500]
+                    + "\n\n"
+                    "请重新输出合法JSON数组。规则：\n"
+                    "- 只输出 JSON 数组（以 [ 开头，以 ] 结尾）\n"
+                    "- 所有字符串必须使用双引号，且字符串内换行必须写成 \\n\n"
+                    "- 不要输出 markdown 代码块\n"
+                )
+                response2 = call_llm(retry_prompt)
+                content2 = response2.content[0].text if response2.content else ""
+                logger.debug(f"Claude重试响应: {content2[:500]}...")
+                steps = self._parse_response(content2)
+
             logger.info(f"规划完成，共 {len(steps)} 个步骤")
             
             return steps
