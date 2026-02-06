@@ -296,6 +296,43 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
         
         logger = logging.getLogger(__name__)
         
+        def _escape_newlines_in_json_strings(text: str) -> str:
+            """
+            修复 LLM 常见输出：在 JSON 字符串内出现未转义换行，导致 json.loads 报：
+            - Unterminated string starting at ...
+            - Invalid control character ...
+            """
+            out_chars: list[str] = []
+            in_string = False
+            escape = False
+            for ch in text:
+                if in_string:
+                    if escape:
+                        out_chars.append(ch)
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        out_chars.append(ch)
+                        escape = True
+                        continue
+                    if ch == "\"":
+                        out_chars.append(ch)
+                        in_string = False
+                        continue
+                    if ch == "\n":
+                        out_chars.append("\\n")
+                        continue
+                    if ch == "\r":
+                        out_chars.append("\\n")
+                        continue
+                    out_chars.append(ch)
+                else:
+                    out_chars.append(ch)
+                    if ch == "\"":
+                        in_string = True
+                        escape = False
+            return "".join(out_chars)
+
         try:
             # 尝试提取JSON（可能包含markdown代码块）
             original_content = content
@@ -317,7 +354,7 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
             
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
                 content = content[start_idx:end_idx + 1]
-            
+
             # 检查是否有超长的字段（content 或 script）可能导致JSON解析失败
             # 如果 JSON 内容超过5KB，尝试修复（降低阈值，更早检测和修复）
             if len(content) > 5000:  # 5KB
@@ -452,6 +489,17 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
             except json.JSONDecodeError as e:
                 parse_error = e
                 logger.warning(f"首次JSON解析失败: {e}，尝试修复...")
+
+                # 第一优先：修复“字符串内未转义换行”（最常见导致 Unterminated string 的原因）
+                if "Unterminated string" in str(e) or "Invalid control character" in str(e):
+                    try:
+                        fixed = _escape_newlines_in_json_strings(content)
+                        steps = json.loads(fixed)
+                        content = fixed
+                        parse_error = None
+                        logger.info("✅ 通过转义字符串内换行修复了JSON解析失败")
+                    except json.JSONDecodeError:
+                        steps = None
                 
                 # 尝试修复 script 字段中的问题
                 # 策略：找到所有 "script": "..." 的部分，尝试修复其中的特殊字符
