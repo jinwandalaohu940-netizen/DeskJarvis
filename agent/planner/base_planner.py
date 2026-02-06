@@ -118,7 +118,7 @@ class BasePlanner(ABC):
         context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        构建反思提示词
+        构建反思提示词（增强版 - 包含常见错误模式和解决方案知识库）
         
         Args:
             instruction: 原始指令
@@ -133,40 +133,137 @@ class BasePlanner(ABC):
         
         plan_str = json.dumps(last_plan, ensure_ascii=False, indent=2)
         
-        prompt = f"""你是一个任务反思专家。上一次执行失败了，请分析原因并给出新方案。
+        # 提取失败的脚本代码（如果有）
+        failed_script = ""
+        for step in last_plan:
+            if step.get("type") == "execute_python_script":
+                script = step.get("params", {}).get("script", "")
+                if script:
+                    # 尝试 base64 解码
+                    try:
+                        import base64
+                        decoded = base64.b64decode(script).decode('utf-8')
+                        failed_script = decoded
+                    except Exception:
+                        failed_script = script
+                    break
+        
+        script_section = ""
+        if failed_script:
+            script_section = f"""
+## 失败的脚本代码
+```python
+{failed_script[:2000]}
+```
+"""
+        
+        prompt = f"""你是一个**专业的错误分析专家**。你的任务是分析执行失败的原因，并给出**正确的修复方案**。
 
 ## 原始任务
 {instruction}
 
 ## 失败的计划
 {plan_str}
-
+{script_section}
 ## 错误信息
 {error}
 
-## 你需要做的
-1. 分析失败原因（简洁，1-2句话）
-2. 生成新的执行计划（修复之前的问题）
+---
+
+## 🔴 常见错误模式及正确解决方案（重要！请对照检查）
+
+### 1. UTF-8 解码错误 / gzip 错误
+**错误特征**: `'utf-8' codec can't decode byte 0x8b` 或 `invalid start byte`
+**原因**: 使用 urllib 下载网页，但网站返回 gzip 压缩内容，urllib 不会自动解压
+**正确修复**:
+```python
+# 错误: urllib.request.urlopen(url).read().decode('utf-8')
+# 正确: 使用 requests 库（自动处理 gzip）
+import requests
+response = requests.get(url)
+html = response.text  # 文本内容，自动解码
+binary = response.content  # 二进制内容（下载文件用）
+```
+
+### 2. f-string 语法错误
+**错误特征**: `name 'f' is not defined` 或 `SyntaxError: invalid syntax` 在 f" 附近
+**原因**: f-string 和引号使用错误，或 f 和引号之间有空格
+**正确修复**:
+```python
+# 错误: f "xxx" 或 f'{{var}}'  
+# 正确: 禁止使用 f-string！使用字符串拼接
+message = "下载成功: " + str(filename)
+```
+
+### 3. Word 文档操作错误
+**错误特征**: `UnicodeDecodeError` 或替换 0 处
+**原因**: 用 open() 读取 .docx，或直接替换 paragraph.text
+**正确修复**:
+```python
+# 必须使用 python-docx
+from docx import Document
+doc = Document(path)
+# 遍历每个 run（格式块）替换
+for para in doc.paragraphs:
+    for run in para.runs:
+        if old_text in run.text:
+            run.text = run.text.replace(old_text, new_text)
+doc.save(path)
+```
+
+### 4. 元素不可见 / 点击超时
+**错误特征**: `element is not visible` 或 `Timeout exceeded`
+**原因**: 页面未加载完成、有弹窗遮挡、元素在视口外
+**正确修复**:
+- 增加等待时间：`page.wait_for_load_state("networkidle")`
+- 滚动到元素：`element.scroll_into_view_if_needed()`
+- 关闭弹窗：先检查并关闭可能的弹窗
+
+### 5. 文件路径错误
+**错误特征**: `FileNotFoundError` 或 `No such file`
+**原因**: 路径中有特殊字符、未展开 ~、路径不存在
+**正确修复**:
+```python
+from pathlib import Path
+# 正确处理路径
+path = Path.home() / "Desktop" / "文件名.txt"
+path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
+```
+
+### 6. 模块不存在
+**错误特征**: `ModuleNotFoundError: No module named 'xxx'`
+**正确修复**: 使用系统自带库，或使用 execute_python_script 自动安装
+
+### 7. colormap 错误
+**错误特征**: `has no attribute 'set3'` 或 colormap 相关
+**正确修复**: 使用 `plt.cm.tab20` 或直接使用颜色列表 `['#ff0000', '#00ff00', ...]`
+
+---
+
+## 你的任务
+1. **仔细阅读上面的错误模式**，判断当前错误属于哪一类
+2. **分析具体原因**（1-2句话）
+3. **生成修复后的新计划**（必须解决上述问题）
 
 ## 输出格式
-返回一个JSON对象：
+只返回 JSON，不要有其他文字：
 {{
-  "analysis": "简洁的错误分析",
+  "analysis": "错误分析：属于[模式X]，原因是[具体原因]，需要[具体修复]",
   "new_plan": [
     {{
       "type": "步骤类型",
       "action": "操作描述",
-      "params": {{}},
+      "params": {{...}},
       "description": "步骤描述"
     }}
   ]
 }}
 
-注意：
-- 只返回JSON，不要有其他内容
-- 新计划要解决之前的问题
-- 如果是参数问题，修正参数
-- 如果是工具不支持，改用脚本（execute_python_script）
+**重要**：
+- 如果错误是脚本语法/库使用问题，新脚本必须**完全重写**，不能只改一点点
+- 使用 requests 替换 urllib
+- 使用字符串拼接替换 f-string
+- 使用 python-docx 处理 Word 文档
 """
         return prompt
     
