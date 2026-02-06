@@ -1,4 +1,4 @@
-# 🤖 DeskJarvis - AI 桌面智能助手
+#  DeskJarvis - AI 桌面智能助手
 
 <p align="center">
   <img src="src-tauri/icons/icon.png" alt="DeskJarvis Logo" width="128" height="128">
