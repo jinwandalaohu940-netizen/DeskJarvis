@@ -333,6 +333,62 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                         escape = False
             return "".join(out_chars)
 
+        def _extract_json_fragment(text: str) -> str:
+            """
+            从混杂文本中提取第一个“完整闭合”的 JSON 片段。
+
+            修复点：
+            - 之前简单使用 find('[') + rfind(']')，会被字符串内的括号干扰，导致截断/解析失败
+            - 这里使用状态机：忽略字符串内部的括号，并做深度计数，找到真正闭合的数组/对象
+            """
+            text = (text or "").strip()
+            if not text:
+                return ""
+
+            def scan(open_ch: str, close_ch: str) -> str:
+                in_string = False
+                escape = False
+                depth = 0
+                start = -1
+                for i, ch in enumerate(text):
+                    if in_string:
+                        if escape:
+                            escape = False
+                            continue
+                        if ch == "\\":
+                            escape = True
+                            continue
+                        if ch == "\"":
+                            in_string = False
+                        continue
+
+                    # not in string
+                    if ch == "\"":
+                        in_string = True
+                        escape = False
+                        continue
+
+                    if ch == open_ch:
+                        if depth == 0:
+                            start = i
+                        depth += 1
+                        continue
+                    if ch == close_ch:
+                        if depth > 0:
+                            depth -= 1
+                            if depth == 0 and start != -1:
+                                return text[start : i + 1]
+                return ""
+
+            # 优先提取数组，其次对象
+            arr = scan("[", "]")
+            if arr:
+                return arr
+            obj = scan("{", "}")
+            if obj:
+                return obj
+            return ""
+
         try:
             # 尝试提取JSON（可能包含markdown代码块）
             original_content = content
@@ -347,13 +403,10 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                 else:
                     content = ""
             
-            # 尝试提取JSON数组（可能被其他文本包围）
-            # 查找第一个 [ 和最后一个 ]
-            start_idx = content.find('[')
-            end_idx = content.rfind(']')
-            
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                content = content[start_idx:end_idx + 1]
+            # 尝试提取JSON片段（数组优先；忽略字符串内括号）
+            extracted = _extract_json_fragment(content)
+            if extracted:
+                content = extracted
 
             # 检查是否有超长的字段（content 或 script）可能导致JSON解析失败
             # 如果 JSON 内容超过5KB，尝试修复（降低阈值，更早检测和修复）
@@ -500,6 +553,17 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                         logger.info("✅ 通过转义字符串内换行修复了JSON解析失败")
                     except json.JSONDecodeError:
                         steps = None
+                # 第二优先：再次尝试提取 JSON 片段（有时模型输出前后带了噪音）
+                if steps is None:
+                    frag = _extract_json_fragment(content)
+                    if frag and frag != content:
+                        try:
+                            steps = json.loads(frag)
+                            content = frag
+                            parse_error = None
+                            logger.info("✅ 通过重新提取 JSON 片段修复了解析失败")
+                        except json.JSONDecodeError:
+                            steps = None
                 
                 # 尝试修复 script 字段中的问题
                 # 策略：找到所有 "script": "..." 的部分，尝试修复其中的特殊字符
@@ -642,6 +706,14 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                 raise ValueError("无法解析JSON")
             
             # 验证格式
+            if isinstance(steps, dict):
+                # 兼容模型返回 {"steps":[...]} 的情况
+                if "steps" in steps and isinstance(steps["steps"], list):
+                    steps = steps["steps"]
+                elif "new_plan" in steps and isinstance(steps["new_plan"], list):
+                    steps = steps["new_plan"]
+                else:
+                    raise ValueError("响应不是数组格式")
             if not isinstance(steps, list):
                 raise ValueError("响应不是数组格式")
             
