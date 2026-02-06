@@ -58,7 +58,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/YOUR_USERNAME/DeskJarvis.git
+git clone https://github.com/jinwandalaohu940-netizen/DeskJarvis.git
 cd DeskJarvis
 
 # 2. 安装前端依赖

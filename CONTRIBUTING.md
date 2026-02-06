@@ -31,7 +31,7 @@
 #### 1. Fork 并克隆仓库
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/DeskJarvis.git
+git clone https://github.com/jinwandalaohu940-netizen/DeskJarvis.git
 cd DeskJarvis
 ```
 
