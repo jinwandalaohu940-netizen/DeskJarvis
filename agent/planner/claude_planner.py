@@ -373,7 +373,7 @@ print(json.dumps(result, ensure_ascii=False))
 
 **脚本示例（Word文档文字替换）**：
 **警告：.docx 是 ZIP 压缩包，绝对禁止用 open() 读取！必须用 python-docx 库！**
-**重要：必须遍历 runs 而不是直接修改 para.text，否则可能替换失败！**
+**重要：Word 可能把一个名字拆成多个 runs（格式块）！仅在 run.text 内 replace 仍可能“替换 0 处”。下面是支持跨 runs 的完美替换写法。**
     ```python
 import json
 from pathlib import Path
@@ -383,6 +383,39 @@ try:
 except ImportError:
     print(json.dumps({{"success": False, "message": "请先安装 python-docx: pip install python-docx"}}))
     exit(0)
+
+# 支持跨 runs 的连续替换（尽量保留替换区前后的格式；替换区使用起始 run 的格式）
+def replace_across_runs(paragraph, old_text, new_text):
+    runs = paragraph.runs
+    if not runs:
+        return 0
+    replaced = 0
+    while True:
+        full = "".join([r.text for r in runs])
+        idx = full.find(old_text)
+        if idx == -1:
+            break
+        mapping = []
+        for run_i, r in enumerate(runs):
+            for off in range(len(r.text)):
+                mapping.append((run_i, off))
+        start = idx
+        end = idx + len(old_text) - 1
+        if end >= len(mapping):
+            break
+        s_run, s_off = mapping[start]
+        e_run, e_off = mapping[end]
+        before = runs[s_run].text[:s_off]
+        after = runs[e_run].text[e_off + 1:]
+        if s_run == e_run:
+            runs[s_run].text = before + new_text + after
+        else:
+            runs[s_run].text = before + new_text
+            for j in range(s_run + 1, e_run):
+                runs[j].text = ""
+            runs[e_run].text = after
+        replaced += 1
+    return replaced
 
 # 目标文件
 file_path = Path.home() / "Desktop" / "文档.docx"
@@ -396,27 +429,47 @@ if not file_path.exists():
 doc = Document(file_path)
 count = 0
 
-# 正确方式：遍历 runs（Word 可能把一个词拆成多个 run）
+# 正文段落
 for para in doc.paragraphs:
-    if old_text in para.text:  # 先检查整段
-        for run in para.runs:  # 再遍历每个 run
-            if old_text in run.text:
-                run.text = run.text.replace(old_text, new_text)
-                count += 1
+    if old_text in para.text:
+        count += replace_across_runs(para, old_text, new_text)
 
-# 表格也要遍历 runs
+# 表格（单元格段落）
 for table in doc.tables:
     for row in table.rows:
         for cell in row.cells:
             if old_text in cell.text:
                 for para in cell.paragraphs:
-                    for run in para.runs:
-                        if old_text in run.text:
-                            run.text = run.text.replace(old_text, new_text)
-                            count += 1
+                    if old_text in para.text:
+                        count += replace_across_runs(para, old_text, new_text)
+
+# 页眉页脚（很多公文会把姓名放在这里）
+for section in doc.sections:
+    for para in section.header.paragraphs:
+        if old_text in para.text:
+            count += replace_across_runs(para, old_text, new_text)
+    for para in section.footer.paragraphs:
+        if old_text in para.text:
+            count += replace_across_runs(para, old_text, new_text)
+    for table in section.header.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    if old_text in para.text:
+                        count += replace_across_runs(para, old_text, new_text)
+    for table in section.footer.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    if old_text in para.text:
+                        count += replace_across_runs(para, old_text, new_text)
 
 doc.save(file_path)
-result = {{"success": True, "message": "替换完成，共替换 " + str(count) + " 处"}}
+if count == 0:
+    # 关键：替换 0 处必须视为失败，让系统进入反思（可能是文本框/图片/OCR）
+    result = {{"success": False, "message": "替换完成但未找到任何可替换内容（0 处）。可能原因：文字在文本框/形状中或是图片扫描件，python-docx 无法直接修改。"}}
+else:
+    result = {{"success": True, "message": "替换完成，共替换 " + str(count) + " 处"}}
 print(json.dumps(result, ensure_ascii=False))
 ```
 

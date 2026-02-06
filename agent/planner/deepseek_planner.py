@@ -296,16 +296,43 @@ class DeepSeekPlanner(BasePlanner):
     - **替换文字的正确方法（极其重要！）**：
       * Word 文档中，一段文字可能被拆分成多个 run（格式块）
       * **错误方式**：`para.text = para.text.replace(old, new)` - 这会丢失格式且可能替换失败
-      * **正确方式**：遍历每个 run，在 run.text 中替换
+      * **正确方式（完美版）**：支持“跨多个 run”的连续替换（名字常被 Word 拆开！）
       ```python
-      for para in doc.paragraphs:
-          if old_text in para.text:  # 先检查整段是否包含目标文字
-              for run in para.runs:
-                  if old_text in run.text:  # 再在 run 中替换
-                      run.text = run.text.replace(old_text, new_text)
-                      count += 1
+      def replace_across_runs(paragraph, old_text, new_text):
+          runs = paragraph.runs
+          if not runs:
+              return 0
+          replaced = 0
+          while True:
+              full = "".join([r.text for r in runs])
+              idx = full.find(old_text)
+              if idx == -1:
+                  break
+              # 建立字符位置到 run 的映射
+              mapping = []
+              for run_i, r in enumerate(runs):
+                  for off in range(len(r.text)):
+                      mapping.append((run_i, off))
+              start = idx
+              end = idx + len(old_text) - 1
+              if end >= len(mapping):
+                  break
+              s_run, s_off = mapping[start]
+              e_run, e_off = mapping[end]
+              before = runs[s_run].text[:s_off]
+              after = runs[e_run].text[e_off + 1:]
+              if s_run == e_run:
+                  runs[s_run].text = before + new_text + after
+              else:
+                  runs[s_run].text = before + new_text
+                  for j in range(s_run + 1, e_run):
+                      runs[j].text = ""
+                  runs[e_run].text = after
+              replaced += 1
+          return replaced
       ```
-      * 同样处理表格：`for table in doc.tables: for row in table.rows: for cell in row.cells: ...`
+      * 遍历范围必须覆盖：正文段落、表格单元格段落、页眉页脚（很多公文姓名在页眉/页脚！）
+      * **重要**：如果替换次数为 0，脚本必须返回 `success: False`，让系统进入反思重试
   * **文件路径**：脚本中应该**直接使用文件路径**（硬编码），不要从环境变量读取。使用 `os.path.expanduser()` 或 `pathlib.Path.home()` 处理 `~` 符号。例如：`file_path = os.path.expanduser("~/Desktop/file.docx")`
   * **重要**：文件路径**不要进行 URL 编码**（不要使用 `urllib.parse.quote()` 或类似函数），直接使用原始的中文文件名。例如：`"~/Desktop/强制执行申请书.docx"` 而不是 `"~/Desktop/%E5%BC%BA%E5%88%B6%E6%89%A7%E8%A1%8C%E7%94%B3%E8%AF%B7%E4%B9%A6.docx"`
   * **文件名必须准确**：必须使用用户指令中提到的**完整准确的文件名**，不要随意更改、替换或编码文件名。
