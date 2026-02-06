@@ -451,10 +451,24 @@ class DeskJarvisAgent:
                 else:
                     # 有失败的步骤
                     failed_steps = [r for r in step_results if not r["result"].get("success")]
-                    last_error = "; ".join([
-                        f"步骤 '{r['step'].get('action', '')}' 失败: {r['result'].get('message', '未知错误')}"
-                        for r in failed_steps
-                    ])
+                    # 反思必须拿到“真实错误细节”（例如 ruff 输出、Traceback），
+                    # 仅使用 message 会丢失关键上下文，导致反思空转。
+                    formatted_errors = []
+                    for r in failed_steps:
+                        step_action = r["step"].get("action", "") or r["step"].get("type", "")
+                        msg = r["result"].get("message", "未知错误")
+                        detail = r["result"].get("error", "")
+                        if detail and detail != msg:
+                            # 控制长度，避免 prompt 过长
+                            formatted_errors.append(
+                                "步骤 '" + str(step_action) + "' 失败: " + str(msg) + "\n"
+                                + "错误详情:\n"
+                                + str(detail)[:2000]
+                            )
+                        else:
+                            formatted_errors.append("步骤 '" + str(step_action) + "' 失败: " + str(msg))
+
+                    last_error = "\n\n".join(formatted_errors)
                     
                     if attempt < max_attempts - 1:
                         emit("thinking", {

@@ -288,17 +288,19 @@ execute_python_script 的 params:
 **脚本必须遵循的规范**：
 1. 必须是完整可执行的 Python 代码
 2. 输出格式必须是：print(json.dumps({{"success": True, "message": "xxx"}})) 或 print(json.dumps({{"success": False, "message": "xxx"}}))
-3. **禁止使用 f-string**！所有字符串拼接必须用 + 号
-4. **语法检查（极其重要）**：
+3. **必须通过 ruff 快检（E/F/B）**：系统会在执行前自动运行 `ruff check --select E,F,B`，不通过会直接失败并进入反思重试
+   - 常见必修点：只 import 你真正用到的（避免 F401），不要引用未定义变量（F821），不要 `except:`（E722），确保没有语法错误（E999），`raise` 保留异常链（B904）
+4. **禁止使用 f-string**！所有字符串拼接必须用 + 号
+5. **语法检查（极其重要）**：
    - 每个引号必须配对闭合
    - 每个括号必须配对闭合
    - **每个 try 必须有 except**（最常见错误！）
    - 字符串拼接格式: "文字" + str(变量) + "文字"
    - **平台检测**：`import sys; sys.platform == "darwin"/"win32"/"linux"`
-5. 注释使用中文，变量名使用英文
-6. 用户主目录: {home_dir}
-7. **错误处理**：所有操作必须在 try-except 中，except 中输出 JSON 格式的错误信息
-8. **HTTP 请求（重要！）**：
+6. 注释使用中文，变量名使用英文
+7. 用户主目录: {home_dir}
+8. **错误处理**：所有操作必须在 try-except 中，except 中输出 JSON 格式的错误信息
+9. **HTTP 请求（重要！）**：
    - **必须使用 requests 库**，不要用 urllib！urllib 不会自动解压 gzip！
    - `import requests` → `response = requests.get(url)`
    - 下载二进制文件用 `response.content`，下载文本用 `response.text`

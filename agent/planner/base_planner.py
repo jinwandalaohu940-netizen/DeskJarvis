@@ -142,7 +142,12 @@ class BasePlanner(ABC):
                     # 尝试 base64 解码
                     try:
                         import base64
-                        decoded = base64.b64decode(script).decode('utf-8')
+                        script_clean = "".join(str(script).split())
+                        # 补齐 padding（模型经常漏掉末尾 '='）
+                        missing_padding = len(script_clean) % 4
+                        if missing_padding:
+                            script_clean += "=" * (4 - missing_padding)
+                        decoded = base64.b64decode(script_clean, validate=False).decode("utf-8", errors="strict")
                         failed_script = decoded
                     except Exception:
                         failed_script = script
