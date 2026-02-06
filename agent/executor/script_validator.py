@@ -125,6 +125,8 @@ class ScriptValidator:
                 str(tmp),
                 "--select",
                 "E,F,B",
+                "--ignore",
+                "E501",
                 "--quiet",
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)

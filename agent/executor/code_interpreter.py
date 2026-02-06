@@ -315,6 +315,27 @@ class CodeInterpreter:
             else:
                 # 不是 base64：按普通字符串处理
                 script = script.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+
+        # 二次兜底：如果仍然像 base64，但没有被解码，做一次“宽松解码”尝试
+        if (
+            isinstance(script, str)
+            and len(script) >= 128
+            and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-" for c in script)
+        ):
+            try:
+                cleaned = script.replace("-", "+").replace("_", "/")
+                missing_padding = len(cleaned) % 4
+                if missing_padding:
+                    cleaned += "=" * (4 - missing_padding)
+                decoded_bytes = base64.b64decode(cleaned, validate=False)
+                decoded_str = decoded_bytes.decode("utf-8", errors="ignore")
+                if decoded_str.strip().startswith(
+                    ("import ", "from ", "def ", "class ", "try:", "if ", "print(", "#", '"""')
+                ):
+                    logger.info("检测到 base64 编码的脚本（宽松解码），已解码")
+                    script = decoded_str
+            except Exception:
+                pass
         
         # 清理控制字符（保留换行、制表符、回车）
         allowed_control_chars = {'\n', '\r', '\t'}
