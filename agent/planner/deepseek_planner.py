@@ -208,6 +208,88 @@ class DeepSeekPlanner(BasePlanner):
                     context_info += f"- 之前操作过的文件: {', '.join(created_files[:5])}\n"
                 context_info += "\n提示：如果用户说\"这个文件\"、\"刚才的文件\"等，请结合对话历史和文件上下文判断用户指的是哪个文件。\n"
         
+        # 按需精简 prompt
+        needs_browser = any(kw in instruction for kw in [
+            "网页", "网站", "浏览", "搜索", "下载", "http", "www",
+            "百度", "谷歌", "google", "访问", "登录",
+        ])
+        needs_word = any(kw in instruction.lower() for kw in [
+            "word", "docx", ".docx", "替换文字", "替换文档",
+        ])
+        needs_chart = any(kw in instruction for kw in [
+            "图表", "柱形图", "饼图", "折线图", "统计", "chart",
+        ])
+        
+        browser_section = ""
+        if needs_browser:
+            browser_section = """
+**浏览器操作**：
+- browser_navigate: 导航网页 → params: {{"url": "网址"}}
+- browser_click: 点击元素 → params: {{"selector": "选择器"}}
+- browser_fill: 填写表单 → params: {{"selector": "选择器", "value": "值"}}
+- browser_screenshot: 截图网页 → params: {{"save_path": "保存路径"}}
+- download_file: 下载文件 → params: {{"selector": "下载按钮选择器"}} 或 {{"text": "下载按钮文字"}}
+- download_latest_python_installer: 下载最新 Python → params: {{"save_dir": "保存目录"}}
+
+**登录和验证码**：
+- request_login: 请求登录 → params: {{"site_name": "网站名", "username_selector": "...", "password_selector": "..."}}
+- request_captcha: 请求验证码 → params: {{"site_name": "网站名", "captcha_image_selector": "...", "captcha_input_selector": "..."}}
+"""
+        
+        word_section = ""
+        if needs_word:
+            word_section = """
+**Word文档处理（.docx）**：
+- **必须使用 python-docx 库**：`from docx import Document`
+- **绝对禁止用 open() 读取 .docx 文件**！
+- **替换文字必须用 replace_across_runs 函数**：
+  ```python
+  def replace_across_runs(paragraph, old_text, new_text):
+      runs = paragraph.runs
+      if not runs:
+          return 0
+      replaced = 0
+      while True:
+          full = "".join([r.text for r in runs])
+          idx = full.find(old_text)
+          if idx == -1:
+              break
+          mapping = []
+          for run_i, r in enumerate(runs):
+              for off in range(len(r.text)):
+                  mapping.append((run_i, off))
+          start = idx
+          end = idx + len(old_text) - 1
+          if end >= len(mapping):
+              break
+          s_run, s_off = mapping[start]
+          e_run, e_off = mapping[end]
+          before = runs[s_run].text[:s_off]
+          after = runs[e_run].text[e_off + 1:]
+          if s_run == e_run:
+              runs[s_run].text = before + new_text + after
+          else:
+              runs[s_run].text = before + new_text
+              for j in range(s_run + 1, e_run):
+                  runs[j].text = ""
+              runs[e_run].text = after
+          replaced += 1
+      return replaced
+  ```
+- 遍历范围：正文段落 + 表格 + 页眉页脚
+- 替换 0 处必须返回 `success: False`
+"""
+        
+        chart_section = ""
+        if needs_chart:
+            chart_section = """
+**Matplotlib 图表用法**：
+- 颜色列表：`colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']`
+- **不要用** `plt.cm.set3` 或 `plt.cm.Set3`
+- 中文：`plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']`
+- 保存：`plt.savefig(路径, dpi=150, bbox_inches='tight', facecolor='white')`
+"""
+        
         prompt = f"""你是一个AI任务规划助手。请理解用户的自然语言指令，生成可执行的任务步骤。
 
 **最重要的规则（必须遵守！）**：
@@ -240,18 +322,8 @@ class DeepSeekPlanner(BasePlanner):
 - open_folder: 打开文件夹 → params: {{"folder_path": "文件夹路径"}}
 - open_app: 打开应用 → params: {{"app_name": "应用名"}}
 - close_app: 关闭应用 → params: {{"app_name": "应用名"}}
-- browser_navigate: 导航网页 → params: {{"url": "网址"}}
-- browser_click: 点击元素 → params: {{"selector": "选择器"}}
-- browser_fill: 填写表单 → params: {{"selector": "选择器", "value": "值"}}
-- browser_screenshot: 截图网页 → params: {{"save_path": "保存路径"}}
-- download_file: 下载文件（通过浏览器点击下载链接）→ params: {{"selector": "下载按钮/链接选择器"}} 或 {{"text": "下载按钮文字"}}，可选 {{"save_path": "保存路径/目录"}}, {{"timeout": 60000}}
-- download_latest_python_installer: 下载最新 Python 安装包（推荐，避免脚本出错）→ params: {{"save_dir": "保存目录（可选，默认桌面）"}} 或 {{"save_path": "保存路径/目录（可选）"}}, 可选 {{"timeout": 180000}}
 - execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
-
-**登录和验证码工具**（遇到需要登录或验证码的网站时使用）：
-- request_login: 请求用户登录 → params: {{"site_name": "网站名", "username_selector": "用户名输入框选择器", "password_selector": "密码输入框选择器", "submit_selector": "提交按钮选择器（可选）"}}
-- request_captcha: 请求验证码 → params: {{"site_name": "网站名", "captcha_image_selector": "验证码图片选择器", "captcha_input_selector": "验证码输入框选择器"}}
-
+{browser_section}
 **系统控制工具**：
 - set_volume: 设置音量 → params: {{"level": 0-100}} 或 {{"action": "mute/unmute/up/down"}}
 - set_brightness: 设置屏幕亮度 → params: {{"level": 0.0-1.0}} 或 {{"action": "up/down/max/min"}}（优先使用此工具！）
@@ -335,50 +407,7 @@ class DeepSeekPlanner(BasePlanner):
       with open(path, "wb") as f:
           f.write(response.content)
       ```
-  * **Word文档处理（.docx）**：
-    - **必须使用 python-docx 库**：`from docx import Document`
-    - **绝对禁止用 open() 读取 .docx 文件**！.docx 是 ZIP 压缩包，不是文本文件，用 open() 会报 UnicodeDecodeError
-    - 正确方式：`doc = Document(file_path)` → 遍历 `doc.paragraphs` 和 `doc.tables`
-    - **替换文字的正确方法（极其重要！）**：
-      * Word 文档中，一段文字可能被拆分成多个 run（格式块）
-      * **错误方式**：`para.text = para.text.replace(old, new)` - 这会丢失格式且可能替换失败
-      * **正确方式（完美版）**：支持“跨多个 run”的连续替换（名字常被 Word 拆开！）
-      ```python
-      def replace_across_runs(paragraph, old_text, new_text):
-          runs = paragraph.runs
-          if not runs:
-              return 0
-          replaced = 0
-          while True:
-              full = "".join([r.text for r in runs])
-              idx = full.find(old_text)
-              if idx == -1:
-                  break
-              # 建立字符位置到 run 的映射
-              mapping = []
-              for run_i, r in enumerate(runs):
-                  for off in range(len(r.text)):
-                      mapping.append((run_i, off))
-              start = idx
-              end = idx + len(old_text) - 1
-              if end >= len(mapping):
-                  break
-              s_run, s_off = mapping[start]
-              e_run, e_off = mapping[end]
-              before = runs[s_run].text[:s_off]
-              after = runs[e_run].text[e_off + 1:]
-              if s_run == e_run:
-                  runs[s_run].text = before + new_text + after
-              else:
-                  runs[s_run].text = before + new_text
-                  for j in range(s_run + 1, e_run):
-                      runs[j].text = ""
-                  runs[e_run].text = after
-              replaced += 1
-          return replaced
-      ```
-      * 遍历范围必须覆盖：正文段落、表格单元格段落、页眉页脚（很多公文姓名在页眉/页脚！）
-      * **重要**：如果替换次数为 0，脚本必须返回 `success: False`，让系统进入反思重试
+{word_section}
   * **文件路径**：脚本中应该**直接使用文件路径**（硬编码），不要从环境变量读取。使用 `os.path.expanduser()` 或 `pathlib.Path.home()` 处理 `~` 符号。例如：`file_path = os.path.expanduser("~/Desktop/file.docx")`
   * **重要**：文件路径**不要进行 URL 编码**（不要使用 `urllib.parse.quote()` 或类似函数），直接使用原始的中文文件名。例如：`"~/Desktop/强制执行申请书.docx"` 而不是 `"~/Desktop/%E5%BC%BA%E5%88%B6%E6%89%A7%E8%A1%8C%E7%94%B3%E8%AF%B7%E4%B9%A6.docx"`
   * **文件名必须准确**：必须使用用户指令中提到的**完整准确的文件名**，不要随意更改、替换或编码文件名。
@@ -414,12 +443,7 @@ class DeepSeekPlanner(BasePlanner):
       elif sys.platform == "linux":  # Linux
       ```
       **错误**: `os.name.astype()` 根本不存在！
-  * **Matplotlib 图表绑定用法**：
-    - 使用 `plt.pie()` 画饼图，使用 `plt.bar()` 画柱状图
-    - 饼图颜色使用列表：`colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8']`
-    - **不要使用** `plt.cm.set3` 或 `plt.cm.Set3`，使用上面的颜色列表
-    - 中文显示：`plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']`
-    - 保存图表：`plt.savefig(路径, dpi=150, bbox_inches='tight', facecolor='white')`
+{chart_section}
   * **文件名搜索（关键）**：
     - 用户说的可能是部分文件名（如"强制执行申请书"可能指"强制执行申请书-张三.docx"）
     - **先用 glob 或 os.listdir 搜索匹配的文件**，再进行操作

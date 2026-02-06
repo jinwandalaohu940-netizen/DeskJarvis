@@ -202,10 +202,21 @@ class ClaudePlanner(BasePlanner):
             if context_parts:
                 context_str = "\n## 上下文信息\n\n" + "\n\n".join(context_parts) + "\n"
         
-        prompt = f"""你是 DeskJarvis，一个智能桌面助手。请用中文思考和输出。
-
-## 你的能力
-
+        # 按需精简 prompt：根据任务类型只包含相关工具说明
+        needs_browser = any(kw in instruction for kw in [
+            "网页", "网站", "浏览", "搜索", "下载", "http", "www",
+            "百度", "谷歌", "google", "访问", "登录",
+        ])
+        needs_word = any(kw in instruction.lower() for kw in [
+            "word", "docx", ".docx", "替换文字", "替换文档",
+        ])
+        needs_chart = any(kw in instruction for kw in [
+            "图表", "柱形图", "饼图", "折线图", "统计", "chart",
+        ])
+        
+        browser_section = ""
+        if needs_browser:
+            browser_section = """
 ### 1. 浏览器操作
 - browser_navigate: 访问网页，params: {{url: "..."}}
 - browser_click: 点击元素，params: {{selector: "..."}} 或 {{text: "..."}}
@@ -214,7 +225,106 @@ class ClaudePlanner(BasePlanner):
 - download_file: 下载文件（通过浏览器点击下载链接），params: {{selector: "..."}} 或 {{text: "..."}}, 可选 {{save_path: "保存路径/目录"}}, {{timeout: 60000}}
 - request_login: 请求用户登录（弹出登录对话框），params: {{site_name: "网站名", username_selector: "用户名输入框选择器", password_selector: "密码输入框选择器", submit_selector: "提交按钮选择器（可选）"}}
 - request_captcha: 请求验证码（截取验证码图片并弹出输入框），params: {{site_name: "网站名", captcha_image_selector: "验证码图片选择器", captcha_input_selector: "验证码输入框选择器"}}
+"""
+        
+        word_doc_section = ""
+        if needs_word:
+            word_doc_section = """
+**脚本示例（Word文档文字替换）**：
+**警告：.docx 是 ZIP 压缩包，绝对禁止用 open() 读取！必须用 python-docx 库！**
+**重要：Word 可能把一个名字拆成多个 runs（格式块）！仅在 run.text 内 replace 仍可能"替换 0 处"。下面是支持跨 runs 的完美替换写法。**
+    ```python
+import json
+from pathlib import Path
 
+try:
+    from docx import Document
+except ImportError:
+    print(json.dumps({{"success": False, "message": "请先安装 python-docx: pip install python-docx"}}))
+    exit(0)
+
+def replace_across_runs(paragraph, old_text, new_text):
+    runs = paragraph.runs
+    if not runs:
+        return 0
+    replaced = 0
+    while True:
+        full = "".join([r.text for r in runs])
+        idx = full.find(old_text)
+        if idx == -1:
+            break
+        mapping = []
+        for run_i, r in enumerate(runs):
+            for off in range(len(r.text)):
+                mapping.append((run_i, off))
+        start = idx
+        end = idx + len(old_text) - 1
+        if end >= len(mapping):
+            break
+        s_run, s_off = mapping[start]
+        e_run, e_off = mapping[end]
+        before = runs[s_run].text[:s_off]
+        after = runs[e_run].text[e_off + 1:]
+        if s_run == e_run:
+            runs[s_run].text = before + new_text + after
+        else:
+            runs[s_run].text = before + new_text
+            for j in range(s_run + 1, e_run):
+                runs[j].text = ""
+            runs[e_run].text = after
+        replaced += 1
+    return replaced
+
+file_path = Path.home() / "Desktop" / "文档.docx"
+old_text = "原文字"
+new_text = "新文字"
+doc = Document(file_path)
+count = 0
+for para in doc.paragraphs:
+    if old_text in para.text:
+        count += replace_across_runs(para, old_text, new_text)
+for table in doc.tables:
+    for row in table.rows:
+        for cell in row.cells:
+            if old_text in cell.text:
+                for para in cell.paragraphs:
+                    if old_text in para.text:
+                        count += replace_across_runs(para, old_text, new_text)
+for section in doc.sections:
+    for para in section.header.paragraphs:
+        if old_text in para.text:
+            count += replace_across_runs(para, old_text, new_text)
+    for para in section.footer.paragraphs:
+        if old_text in para.text:
+            count += replace_across_runs(para, old_text, new_text)
+doc.save(file_path)
+if count == 0:
+    result = {{"success": False, "message": "替换完成但未找到任何可替换内容（0 处）"}}
+else:
+    result = {{"success": True, "message": "替换完成，共替换 " + str(count) + " 处"}}
+print(json.dumps(result, ensure_ascii=False))
+```
+"""
+        
+        chart_section = ""
+        if needs_chart:
+            chart_section = """
+## Matplotlib 图表绑定用法（画图必看）
+
+1. 饼图颜色使用列表，不要用 cm.Set3：
+   ```python
+   colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE']
+   plt.pie(sizes, labels=labels, colors=colors[:len(labels)], autopct='%1.1f%%')
+   ```
+2. 中文显示：`plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']`
+3. 保存图表：`plt.savefig(路径, dpi=150, bbox_inches='tight', facecolor='white')`
+4. **不要使用** `plt.cm.set3`、`plt.cm.Set3` 等，会报错！
+"""
+        
+        prompt = f"""你是 DeskJarvis，一个智能桌面助手。请用中文思考和输出。
+
+## 你的能力
+{browser_section}
 ### 2. 系统操作
 - screenshot_desktop: 截取桌面，params: {{save_path: "保存路径（可选）"}}
 - open_folder: 打开文件夹，params: {{folder_path: "..."}}
@@ -401,108 +511,7 @@ else:
 print(json.dumps(result, ensure_ascii=False))
 ```
 
-**脚本示例（Word文档文字替换）**：
-**警告：.docx 是 ZIP 压缩包，绝对禁止用 open() 读取！必须用 python-docx 库！**
-**重要：Word 可能把一个名字拆成多个 runs（格式块）！仅在 run.text 内 replace 仍可能“替换 0 处”。下面是支持跨 runs 的完美替换写法。**
-    ```python
-import json
-from pathlib import Path
-
-try:
-    from docx import Document
-except ImportError:
-    print(json.dumps({{"success": False, "message": "请先安装 python-docx: pip install python-docx"}}))
-    exit(0)
-
-# 支持跨 runs 的连续替换（尽量保留替换区前后的格式；替换区使用起始 run 的格式）
-def replace_across_runs(paragraph, old_text, new_text):
-    runs = paragraph.runs
-    if not runs:
-        return 0
-    replaced = 0
-    while True:
-        full = "".join([r.text for r in runs])
-        idx = full.find(old_text)
-        if idx == -1:
-            break
-        mapping = []
-        for run_i, r in enumerate(runs):
-            for off in range(len(r.text)):
-                mapping.append((run_i, off))
-        start = idx
-        end = idx + len(old_text) - 1
-        if end >= len(mapping):
-            break
-        s_run, s_off = mapping[start]
-        e_run, e_off = mapping[end]
-        before = runs[s_run].text[:s_off]
-        after = runs[e_run].text[e_off + 1:]
-        if s_run == e_run:
-            runs[s_run].text = before + new_text + after
-        else:
-            runs[s_run].text = before + new_text
-            for j in range(s_run + 1, e_run):
-                runs[j].text = ""
-            runs[e_run].text = after
-        replaced += 1
-    return replaced
-
-# 目标文件
-file_path = Path.home() / "Desktop" / "文档.docx"
-old_text = "原文字"
-new_text = "新文字"
-
-if not file_path.exists():
-    print(json.dumps({{"success": False, "message": "文件不存在: " + str(file_path)}}))
-    exit(0)
-
-doc = Document(file_path)
-count = 0
-
-# 正文段落
-for para in doc.paragraphs:
-    if old_text in para.text:
-        count += replace_across_runs(para, old_text, new_text)
-
-# 表格（单元格段落）
-for table in doc.tables:
-    for row in table.rows:
-        for cell in row.cells:
-            if old_text in cell.text:
-                for para in cell.paragraphs:
-                    if old_text in para.text:
-                        count += replace_across_runs(para, old_text, new_text)
-
-# 页眉页脚（很多公文会把姓名放在这里）
-for section in doc.sections:
-    for para in section.header.paragraphs:
-        if old_text in para.text:
-            count += replace_across_runs(para, old_text, new_text)
-    for para in section.footer.paragraphs:
-        if old_text in para.text:
-            count += replace_across_runs(para, old_text, new_text)
-    for table in section.header.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if old_text in para.text:
-                        count += replace_across_runs(para, old_text, new_text)
-    for table in section.footer.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    if old_text in para.text:
-                        count += replace_across_runs(para, old_text, new_text)
-
-doc.save(file_path)
-if count == 0:
-    # 关键：替换 0 处必须视为失败，让系统进入反思（可能是文本框/图片/OCR）
-    result = {{"success": False, "message": "替换完成但未找到任何可替换内容（0 处）。可能原因：文字在文本框/形状中或是图片扫描件，python-docx 无法直接修改。"}}
-else:
-    result = {{"success": True, "message": "替换完成，共替换 " + str(count) + " 处"}}
-print(json.dumps(result, ensure_ascii=False))
-```
-
+{word_doc_section}
 ## 任务
 {instruction}
 {context_str}
@@ -519,17 +528,7 @@ print(json.dumps(result, ensure_ascii=False))
 2. **JSON 输出必须正确**：脚本最后一行必须是 print(json.dumps(..., ensure_ascii=False))
 3. **错误也要 JSON 格式**：except 中也要用 print(json.dumps({{"success": False, "message": str(e)}})) 输出
 
-## Matplotlib 图表绑定用法（画图必看）
-
-1. 饼图颜色使用列表，不要用 cm.Set3：
-   ```python
-   colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE']
-   plt.pie(sizes, labels=labels, colors=colors[:len(labels)], autopct='%1.1f%%')
-   ```
-2. 中文显示：`plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei']`
-3. 保存图表：`plt.savefig(路径, dpi=150, bbox_inches='tight', facecolor='white')`
-4. **不要使用** `plt.cm.set3`、`plt.cm.Set3` 等，会报错！
-
+{chart_section}
 ## 输出格式
 
 返回一个 JSON 数组，每个元素是一个步骤：

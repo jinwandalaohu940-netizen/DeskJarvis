@@ -178,8 +178,8 @@ class CodeInterpreter:
                 # 尝试自动修复错误
                 enhanced_code = self._try_fix_error(enhanced_code, last_error)
 
-            # 3.5 执行前验证（lint/契约/dry-run）
-            self._emit_progress("validating_script", "正在检查脚本质量（ruff + dry-run）…")
+            # 3.5 执行前验证（ruff --fix 自动修复 + 仅致命错误阻断）
+            self._emit_progress("validating_script", "正在检查脚本质量…")
             validation = self.validator.validate(
                 enhanced_code,
                 lint=True,
@@ -187,6 +187,12 @@ class CodeInterpreter:
                 dry_run=True,
                 dry_run_timeout_sec=2,
             )
+
+            # 如果 ruff --fix 修复了代码，采用修复后版本
+            if validation.fixed_code:
+                enhanced_code = validation.fixed_code
+                logger.info("已采用 ruff --fix 自动修复后的代码")
+
             if not validation.ok:
                 last_error = "脚本验证失败: " + validation.message
                 if validation.details:

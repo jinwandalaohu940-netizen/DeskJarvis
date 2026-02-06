@@ -137,6 +137,13 @@ class DeskJarvisAgent:
         try:
             logger.info(f"收到用户指令: {user_instruction}")
             
+            # ========== 快速通道：简单任务跳过 LLM 规划 ==========
+            # 翻译/总结/截图/打开应用等不需要完整规划流程
+            fast_result = self._try_fast_path(user_instruction, context, emit)
+            if fast_result is not None:
+                logger.info("快速通道命中，跳过完整规划流程")
+                return fast_result
+            
             # ========== 阶段0: 获取记忆上下文 ==========
             memory_context = self.memory.get_context_for_instruction(user_instruction)
             if memory_context:
@@ -154,7 +161,7 @@ class DeskJarvisAgent:
             
             # ========== 阶段1: AI 思考 ==========
             emit("thinking", {
-                "content": f"好的，我来帮你处理：{user_instruction[:50]}{'...' if len(user_instruction) > 50 else ''}",
+                "content": "好的，我来帮你处理：" + user_instruction[:50] + ("..." if len(user_instruction) > 50 else ""),
                 "phase": "analyzing"
             })
             
@@ -266,12 +273,373 @@ class DeskJarvisAgent:
                 "user_instruction": user_instruction
             }
     
+    # ========== 快速通道 ==========
+    
+    def _try_fast_path(
+        self,
+        instruction: str,
+        context: Optional[Dict[str, Any]],
+        emit: Callable
+    ) -> Optional[Dict[str, Any]]:
+        """
+        快速通道：对于明确的简单任务，跳过完整 LLM 规划，直接执行。
+        
+        翻译/总结 等文本处理：30秒 → 3秒
+        截图/打开应用 等系统操作：15秒 → 1秒
+        
+        Returns:
+            执行结果字典，如果不是快速通道任务则返回 None
+        """
+        # 1. 文本处理快速通道
+        text_match = self._detect_text_fast_path(instruction)
+        if text_match:
+            action, text, target_lang = text_match
+            action_names = {
+                "translate": "翻译文本",
+                "summarize": "总结文本",
+                "polish": "润色文本",
+                "expand": "扩写文本",
+                "fix_grammar": "修正语法",
+            }
+            step = {
+                "type": "text_process",
+                "action": action_names.get(action, "处理文本"),
+                "params": {"text": text, "action": action, "target_lang": target_lang},
+                "description": action_names.get(action, "处理文本"),
+            }
+            return self._execute_fast_path(instruction, step, emit, "收到，直接处理文本...")
+        
+        # 2. 简单系统操作快速通道
+        simple_step = self._detect_simple_fast_path(instruction, context)
+        if simple_step:
+            return self._execute_fast_path(instruction, simple_step, emit, "好的，马上执行...")
+        
+        return None
+    
+    def _execute_fast_path(
+        self,
+        instruction: str,
+        step: Dict[str, Any],
+        emit: Callable,
+        thinking_msg: str,
+    ) -> Dict[str, Any]:
+        """执行快速通道的单步任务，发送完整的前端事件"""
+        start_time = time.time()
+        
+        emit("thinking", {"content": thinking_msg, "phase": "fast_path"})
+        emit("plan_ready", {
+            "content": step.get("action", "执行任务"),
+            "steps": [step],
+            "step_count": 1,
+        })
+        emit("execution_started", {"step_count": 1, "attempt": 1})
+        emit("step_started", {
+            "step_index": 0,
+            "total_steps": 1,
+            "step": step,
+            "action": step.get("action", ""),
+        })
+        
+        result = self._execute_single_step(step)
+        
+        if result.get("success"):
+            emit("step_completed", {
+                "step_index": 0,
+                "total_steps": 1,
+                "step": step,
+                "result": result,
+                "status": "success",
+            })
+            emit("task_completed", {
+                "success": True,
+                "message": "任务完成",
+                "success_count": 1,
+                "total_count": 1,
+            })
+        else:
+            emit("step_failed", {
+                "step_index": 0,
+                "total_steps": 1,
+                "step": step,
+                "result": result,
+                "error": result.get("message", ""),
+                "status": "failed",
+            })
+            emit("task_completed", {
+                "success": False,
+                "message": result.get("message", "执行失败"),
+                "success_count": 0,
+                "total_count": 1,
+            })
+        
+        duration = time.time() - start_time
+        step_result = {"step": step, "result": result}
+        
+        # 保存记忆
+        try:
+            self.memory.save_task_result(
+                instruction=instruction,
+                steps=[step],
+                result={"success": result.get("success", False), "message": result.get("message", "")},
+                success=result.get("success", False),
+                duration=duration,
+                files_involved=[],
+            )
+        except Exception as mem_err:
+            logger.warning("保存快速通道记忆失败: " + str(mem_err))
+        
+        return {
+            "success": result.get("success", False),
+            "message": result.get("message", ""),
+            "steps": [step_result],
+            "user_instruction": instruction,
+            "attempts": 1,
+            "fast_path": True,
+        }
+    
+    def _detect_text_fast_path(self, instruction: str):
+        """
+        检测是否为纯文本处理任务（翻译/总结/润色/扩写/语法修正）。
+        
+        Returns:
+            (action, text, target_lang) 或 None
+        """
+        # 排除涉及文件操作的指令
+        file_keywords = ["文件", "文档", "Word", "word", "docx", "xlsx",
+                         "pdf", "图片", "照片", "桌面上的"]
+        for kw in file_keywords:
+            if kw in instruction:
+                return None
+        
+        # 文本处理关键词映射
+        action_keywords = [
+            ("translate", ["翻译"]),
+            ("summarize", ["总结", "概括", "摘要"]),
+            ("polish", ["润色"]),
+            ("expand", ["扩写"]),
+            ("fix_grammar", ["修正语法", "纠正语法", "语法修正", "修改语法"]),
+        ]
+        
+        for action, keywords in action_keywords:
+            for kw in keywords:
+                if kw in instruction:
+                    text = self._extract_text_for_processing(instruction, kw)
+                    if text and len(text) >= 2:
+                        target_lang = "英文"
+                        if action == "translate":
+                            target_lang = self._detect_target_lang(instruction)
+                        return (action, text, target_lang)
+        
+        return None
+    
+    def _extract_text_for_processing(self, instruction: str, keyword: str) -> str:
+        """从指令中提取要处理的文本"""
+        import re
+        
+        # 移除常见前缀
+        text = instruction
+        for prefix in ["帮我", "请帮我", "请", "麻烦"]:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        
+        # 找到关键词位置
+        idx = text.find(keyword)
+        if idx == -1:
+            return ""
+        
+        after = text[idx + len(keyword):].strip()
+        
+        # 移除常见中缀词（"一下"、"以下内容"、"成英文"、分隔符等）
+        remove_patterns = [
+            r'^一下[：:]*\s*',
+            r'^下[：:]*\s*',
+            r'^以下内容[：:]*\s*',
+            r'^以下[：:]*\s*',
+            r'^这段话[：:]*\s*',
+            r'^这段文字[：:]*\s*',
+            r'^这段[：:]*\s*',
+            r'^成[^\s：:]{1,6}[：:]*\s*',
+            r'^为[^\s：:]{1,6}[：:]*\s*',
+            r'^到[^\s：:]{1,6}[：:]*\s*',
+            r'^[：:；;\s]+',
+        ]
+        for pattern in remove_patterns:
+            after = re.sub(pattern, '', after, count=1)
+        
+        return after.strip()
+    
+    def _detect_target_lang(self, instruction: str) -> str:
+        """检测翻译目标语言"""
+        lang_keywords = {
+            "英文": ["英文", "英语", "english"],
+            "中文": ["中文", "汉语", "chinese"],
+            "日文": ["日文", "日语", "japanese"],
+            "韩文": ["韩文", "韩语", "korean"],
+            "法文": ["法文", "法语", "french"],
+            "德文": ["德文", "德语", "german"],
+            "西班牙文": ["西班牙文", "西班牙语"],
+        }
+        inst_lower = instruction.lower()
+        for lang, kws in lang_keywords.items():
+            for kw in kws:
+                if kw in inst_lower:
+                    return lang
+        
+        # 智能检测：中文多则翻译成英文，否则翻译成中文
+        chinese_count = sum(1 for c in instruction if '\u4e00' <= c <= '\u9fff')
+        if chinese_count > len(instruction) * 0.3:
+            return "英文"
+        return "中文"
+    
+    def _detect_simple_fast_path(
+        self,
+        instruction: str,
+        context: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        检测是否为简单的单步系统操作。
+        
+        Returns:
+            构造好的 step 字典，或 None
+        """
+        import re
+        inst = instruction.strip()
+        
+        # --- 截图桌面 ---
+        if any(kw in inst for kw in ["截图桌面", "桌面截图", "截屏", "截个图"]):
+            params: Dict[str, Any] = {}
+            if "保存" in inst and "桌面" in inst:
+                params["save_path"] = "~/Desktop/screenshot.png"
+            return {
+                "type": "screenshot_desktop",
+                "action": "截图桌面",
+                "params": params,
+                "description": "截取桌面截图",
+            }
+        
+        # --- 打开应用 ---
+        match = re.match(r'^(?:帮我)?(?:请)?打开\s*(.+)$', inst)
+        if match:
+            target = match.group(1).strip()
+            # 排除复杂指令（"打开浏览器然后xxx"）
+            if any(kw in target for kw in ["然后", "并且", "接着", "之后"]):
+                return None
+            # 判断是路径还是应用名
+            if '/' in target or target.startswith('~'):
+                dot_in_last = '.' in target.split('/')[-1]
+                if dot_in_last:
+                    return {
+                        "type": "open_file",
+                        "action": "打开 " + target,
+                        "params": {"file_path": target},
+                        "description": "打开文件 " + target,
+                    }
+                return {
+                    "type": "open_folder",
+                    "action": "打开 " + target,
+                    "params": {"folder_path": target},
+                    "description": "打开文件夹 " + target,
+                }
+            return {
+                "type": "open_app",
+                "action": "打开 " + target,
+                "params": {"app_name": target},
+                "description": "打开应用 " + target,
+            }
+        
+        # --- 关闭应用 ---
+        match = re.match(r'^(?:帮我)?(?:请)?关闭\s*(.+)$', inst)
+        if match:
+            target = match.group(1).strip()
+            if not any(kw in target for kw in ["然后", "并且", "接着"]):
+                return {
+                    "type": "close_app",
+                    "action": "关闭 " + target,
+                    "params": {"app_name": target},
+                    "description": "关闭应用 " + target,
+                }
+        
+        # --- 音量控制 ---
+        if any(kw in inst for kw in ["音量", "声音", "静音"]):
+            params_vol: Dict[str, Any] = {}
+            if "静音" in inst and "取消" not in inst:
+                params_vol["action"] = "mute"
+            elif "取消静音" in inst:
+                params_vol["action"] = "unmute"
+            elif any(kw in inst for kw in ["调大", "大点", "大一点", "增大"]):
+                params_vol["action"] = "up"
+            elif any(kw in inst for kw in ["调小", "小点", "小一点", "减小"]):
+                params_vol["action"] = "down"
+            else:
+                nums = re.findall(r'\d+', inst)
+                if nums:
+                    params_vol["level"] = int(nums[0])
+                else:
+                    return None  # 无法确定操作，走正常流程
+            return {
+                "type": "set_volume",
+                "action": "调整音量",
+                "params": params_vol,
+                "description": "调整系统音量",
+            }
+        
+        # --- 亮度控制 ---
+        if any(kw in inst for kw in ["亮度", "屏幕亮度"]):
+            params_br: Dict[str, Any] = {}
+            if any(kw in inst for kw in ["最亮", "最大"]):
+                params_br["action"] = "max"
+            elif any(kw in inst for kw in ["最暗", "最小"]):
+                params_br["action"] = "min"
+            elif any(kw in inst for kw in ["调大", "亮一点", "亮点"]):
+                params_br["action"] = "up"
+            elif any(kw in inst for kw in ["调小", "暗一点", "暗点"]):
+                params_br["action"] = "down"
+            else:
+                nums = re.findall(r'[\d.]+', inst)
+                if nums:
+                    level = float(nums[0])
+                    if level > 1:
+                        level = level / 100
+                    params_br["level"] = level
+                else:
+                    return None
+            return {
+                "type": "set_brightness",
+                "action": "调整亮度",
+                "params": params_br,
+                "description": "调整屏幕亮度",
+            }
+        
+        # --- 系统信息 ---
+        if any(kw in inst for kw in ["系统信息", "查看系统", "电池状态", "磁盘空间", "内存使用"]):
+            info_type = "all"
+            if "电池" in inst:
+                info_type = "battery"
+            elif "磁盘" in inst:
+                info_type = "disk"
+            elif "内存" in inst:
+                info_type = "memory"
+            params_info: Dict[str, Any] = {"info_type": info_type}
+            if "保存" in inst:
+                params_info["save_path"] = "~/Desktop/系统报告.md"
+            return {
+                "type": "get_system_info",
+                "action": "获取系统信息",
+                "params": params_info,
+                "description": "获取系统信息",
+            }
+        
+        return None
+    
+    # ========== 任务复杂度判断 ==========
+    
     def _is_simple_task(self, instruction: str) -> bool:
         """判断是否为简单任务"""
         instruction_lower = instruction.lower()
         
         # 简单任务：单一操作
-        simple_patterns = ["截图", "screenshot", "打开", "open", "关闭", "close"]
+        simple_patterns = ["截图", "screenshot", "打开", "open", "关闭", "close",
+                           "翻译", "总结", "润色", "音量", "亮度", "系统信息"]
         
         # 复杂任务：多步骤
         complex_patterns = ["下载", "download", "整理", "批量", "重命名", "并且", "然后"]
@@ -389,7 +757,7 @@ class DeskJarvisAgent:
                     steps = reflection.get("new_plan", [])
                     
                     emit("thinking", {
-                        "content": f"我知道问题在哪了：{analysis[:100]}{'...' if len(analysis) > 100 else ''}\n换个方法试试...",
+                        "content": "我知道问题在哪了：" + analysis[:100] + ("..." if len(analysis) > 100 else "") + "\n换个方法试试...",
                         "phase": "re_planning"
                     })
                     

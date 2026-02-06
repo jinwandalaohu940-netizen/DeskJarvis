@@ -1,14 +1,19 @@
 """
-脚本验证器：为 AI 生成的临时脚本提供“执行前质量门槛”。
+脚本验证器：为 AI 生成的临时脚本提供"执行前质量门槛"。
 
 目标：
 - 在执行前捕获语法错误/常见逻辑错误（lint）/输出格式不符合约定
-- 可选执行一次“低风险预跑（dry-run）”来提前发现 NameError 等运行时错误
+- 可选执行一次"低风险预跑（dry-run）"来提前发现 NameError 等运行时错误
 - 将验证报告反馈给反思环路，提高自动修复成功率
 
 说明：
-- 这是“最务实”的闭环：不会强制生成 pytest 测试（那会拖慢用户体验）
+- 这是"最务实"的闭环：不会强制生成 pytest 测试（那会拖慢用户体验）
 - dry-run 默认会阻断危险操作（删除文件、子进程等）；若脚本确实需要这些操作，会返回可继续执行的提示
+
+策略（v2）：
+- ruff 分两步：1) `ruff check --fix` 自动修复 2) 重新检查只看致命错误
+- 致命规则（阻断执行）：F821（未定义变量）、E999（语法错误）
+- 其他规则（仅记录警告，不阻断）：E/F/B 其余项
 """
 
 from __future__ import annotations
@@ -26,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 ValidationKind = Literal["syntax", "lint", "contract", "dry_run", "unknown"]
 
+# 这些 ruff 规则代表真正的逻辑 bug，必须阻断执行
+# 注意：E999 在 ruff ≥0.15 中已移除（语法错误由 AST/py_compile 捕获），只保留 F821
+FATAL_RULES = {"F821"}
+
 
 @dataclass
 class ValidationReport:
@@ -35,6 +44,7 @@ class ValidationReport:
     kind: ValidationKind
     message: str
     details: str = ""
+    fixed_code: str = ""  # 如果 ruff --fix 修复了代码，返回修复后版本
 
 
 class ScriptValidator:
@@ -43,7 +53,7 @@ class ScriptValidator:
 
     典型用法：
     - 写入临时脚本
-    - ruff 快检（可选）
+    - ruff --fix 自动修复 → 只对致命错误阻断
     - 输出契约检查（可选：要求 JSON）
     - dry-run 预跑（可选，短超时）
     """
@@ -79,29 +89,43 @@ class ScriptValidator:
         Returns:
             ValidationReport
         """
-        # 1) Lint
-        if lint:
-            ok, msg, details = self._ruff_check(code)
-            if not ok:
-                return ValidationReport(ok=False, kind="lint", message=msg, details=details)
+        fixed_code = code
 
-        # 2) Contract（静态约束：如果要求 JSON，则至少包含 json.dumps + print；这不是强校验，只是挡住明显遗漏）
+        # 1) Lint: 先 --fix 自动修复，再检查是否残留致命错误
+        if lint:
+            ok, msg, details, patched = self._ruff_fix_then_check(code)
+            if patched:
+                fixed_code = patched
+            if not ok:
+                return ValidationReport(
+                    ok=False, kind="lint", message=msg,
+                    details=details, fixed_code=fixed_code,
+                )
+
+        # 2) Contract
         if require_json_output:
-            if "json.dumps" not in code or "print(" not in code:
+            if "json.dumps" not in fixed_code or "print(" not in fixed_code:
                 return ValidationReport(
                     ok=False,
                     kind="contract",
                     message="输出契约不满足：脚本未包含 print(json.dumps(...))，可能导致前端无法解析结果",
-                    details="建议脚本最后输出：print(json.dumps({\"success\": True/False, \"message\": \"...\", \"data\": {...}}, ensure_ascii=False))",
+                    details='建议脚本最后输出：print(json.dumps({"success": True/False, "message": "...", "data": {...}}, ensure_ascii=False))',
+                    fixed_code=fixed_code,
                 )
 
         # 3) Dry-run（可选）
         if dry_run:
-            ok, msg, details, fatal = self._dry_run(code, timeout_sec=dry_run_timeout_sec)
+            ok, msg, details, fatal = self._dry_run(fixed_code, timeout_sec=dry_run_timeout_sec)
             if not ok and fatal:
-                return ValidationReport(ok=False, kind="dry_run", message=msg, details=details)
+                return ValidationReport(
+                    ok=False, kind="dry_run", message=msg,
+                    details=details, fixed_code=fixed_code,
+                )
 
-        return ValidationReport(ok=True, kind="unknown", message="验证通过")
+        return ValidationReport(
+            ok=True, kind="unknown", message="验证通过",
+            fixed_code=fixed_code,
+        )
 
     def _write_tmp(self, code: str) -> Path:
         ts = int(time.time() * 1000)
@@ -109,36 +133,61 @@ class ScriptValidator:
         path.write_text(code, encoding="utf-8")
         return path
 
-    def _ruff_check(self, code: str) -> Tuple[bool, str, str]:
+    # ------------------------------------------------------------------
+    # 核心改造：先 fix 再 check
+    # ------------------------------------------------------------------
+    def _ruff_fix_then_check(self, code: str) -> Tuple[bool, str, str, str]:
         """
-        运行 ruff 快检（若未安装则跳过）。
+        两步 ruff 策略：
+        1. `ruff check --fix` 自动修复可修复项（E501、B905、F401 等）
+        2. 重新读取修复后代码，只检查 FATAL_RULES 是否残留
+
+        Returns:
+            (ok, message, details, fixed_code_or_empty)
+            fixed_code_or_empty: 如果代码被修改则返回修复后文本，否则空字符串
         """
         try:
-            # ruff 作为工具依赖，不强制存在
-            # 仅检查最常见错误：F(未定义等) + E(语法/格式基础) + B(常见bug)
             tmp = self._write_tmp(code)
-            cmd = [
-                sys.executable,
-                "-m",
-                "ruff",
-                "check",
+
+            # ---- Step 1: ruff check --fix （就地修复） ----
+            fix_cmd = [
+                sys.executable, "-m", "ruff", "check",
                 str(tmp),
-                "--select",
-                "E,F,B",
-                "--ignore",
-                "E501",
+                "--select", "E,F,B",
+                "--fix",      # 就地修复
                 "--quiet",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            subprocess.run(fix_cmd, capture_output=True, text=True, timeout=10)
+
+            # 读回修复后代码
+            fixed_code = tmp.read_text(encoding="utf-8")
+
+            # ---- Step 2: 再次检查，只看致命规则 ----
+            fatal_select = ",".join(sorted(FATAL_RULES))
+            check_cmd = [
+                sys.executable, "-m", "ruff", "check",
+                str(tmp),
+                "--select", fatal_select,
+                "--quiet",
+            ]
+            result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=10)
+
             if result.returncode == 0:
-                return True, "ruff 通过", ""
-            output = (result.stdout or "") + "\n" + (result.stderr or "")
-            output = output.strip()
-            return False, "ruff 检查未通过（脚本存在明显问题）", output[:2000]
+                # 没有致命错误
+                if fixed_code != code:
+                    logger.info("ruff --fix 自动修复了部分问题，已采用修复后代码")
+                return True, "ruff 通过", "", fixed_code if fixed_code != code else ""
+
+            # 仍存在致命错误
+            output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+            return False, "ruff 检查发现致命错误（未定义变量/语法错误）", output[:2000], fixed_code
+
+        except FileNotFoundError:
+            logger.debug("ruff 未安装，跳过检查")
+            return True, "ruff 跳过（未安装）", "", ""
         except Exception as e:
-            # ruff 不可用或运行失败 → 不阻断执行
-            logger.debug(f"ruff 检查跳过/失败: {e}")
-            return True, "ruff 跳过", ""
+            logger.debug("ruff 检查跳过/失败: " + str(e))
+            return True, "ruff 跳过", "", ""
 
     def _dry_run(self, code: str, timeout_sec: int) -> Tuple[bool, str, str, bool]:
         """
@@ -150,7 +199,7 @@ class ScriptValidator:
         - fatal: 是否应阻断真实执行
 
         规则：
-        - 如果触发了“被阻断的危险操作”，不视为 fatal（允许继续真实执行）
+        - 如果触发了"被阻断的危险操作"，不视为 fatal（允许继续真实执行）
         - NameError/ImportError/TypeError 等明显运行时错误视为 fatal
         """
         guard = self._build_guard_prelude()
@@ -175,7 +224,6 @@ class ScriptValidator:
             stdout = (result.stdout or "").strip()
             stderr = (result.stderr or "").strip()
             if result.returncode == 0:
-                # 预跑 OK（不要求输出 JSON）
                 return True, "dry-run 通过", stdout[-500:], False
 
             combined = (stderr or stdout or "").strip()
@@ -185,7 +233,6 @@ class ScriptValidator:
             # 其他错误：fatal
             return False, "dry-run 预跑失败（运行时错误，建议重写脚本）", combined[:2000], True
         except subprocess.TimeoutExpired:
-            # 超时不一定是错误（长任务），不阻断
             return False, "dry-run 超时（不阻断真实执行）", "timeout", False
         except Exception as e:
             return False, "dry-run 预跑异常（不阻断真实执行）", str(e), False
@@ -194,7 +241,6 @@ class ScriptValidator:
         """
         生成 dry-run 防护前置代码：阻断明显危险操作。
         """
-        # 使用字符串字面量拼接，避免 f-string
         return (
             "# === DeskJarvis dry-run guard ===\n"
             "import os as _dj_os\n"
@@ -218,4 +264,3 @@ class ScriptValidator:
             "_dj_Path.unlink = _dj_block\n"
             "_dj_Path.rmdir = _dj_block\n"
         )
-
