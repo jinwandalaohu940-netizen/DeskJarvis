@@ -596,6 +596,10 @@ class CodeInterpreter:
         
         如果代码使用了 matplotlib/seaborn/plotly，自动保存图表到桌面
         """
+        # 避免重复注入
+        if "DeskJarvis 图表自动捕获" in code:
+            return code
+
         # 检测是否使用了绘图库
         uses_matplotlib = "matplotlib" in code or "plt." in code
         uses_seaborn = "seaborn" in code or "sns." in code
@@ -612,14 +616,16 @@ class CodeInterpreter:
         # 同时保存一份到 output_dir 供预览
         preview_path = self.output_dir / f"plot_{timestamp}.png"
         
-        # 注入保存代码 - 在代码末尾保存而非使用 atexit
-        injection_code = f'''
-# === DeskJarvis 图表自动捕获 ===
-import matplotlib
-matplotlib.use('Agg')  # 使用非交互式后端
-import matplotlib.pyplot as _dj_plt
-import os
+        # 只注入“纯 import”块，避免 E402（imports must be at top）
+        import_block = (
+            "# === DeskJarvis 图表自动捕获（imports） ===\n"
+            "import matplotlib.pyplot as _dj_plt\n"
+            "# === 结束注入（imports） ===\n\n"
+        )
 
+        # 运行时逻辑放在末尾，避免影响原始 import 区域
+        runtime_block = f'''
+# === DeskJarvis 图表自动捕获 ===
 _dj_desktop_path = "{str(image_path)}"
 _dj_preview_path = "{str(preview_path)}"
 _dj_saved_plots = []
@@ -635,7 +641,6 @@ def _dj_save_current_figure():
         _dj_saved_plots.append(_dj_desktop_path)
         print("图表已保存到: " + _dj_desktop_path)
 # === 结束注入 ===
-
 '''
         
         # 在代码末尾添加保存调用
@@ -644,9 +649,35 @@ def _dj_save_current_figure():
 # === 自动保存图表 ===
 _dj_save_current_figure()
 '''
-        
-        # 将注入代码放在最前面，保存代码放在最后
-        return injection_code + code + save_code
+
+        def _insert_import_block(src: str, block: str) -> str:
+            lines = src.splitlines()
+            idx = 0
+            # Shebang
+            if lines and lines[0].startswith("#!"):
+                idx = 1
+            # Encoding comment
+            if idx < len(lines) and "coding" in lines[idx]:
+                idx += 1
+            # Module docstring
+            if idx < len(lines) and lines[idx].lstrip().startswith(('"""', "'''")):
+                quote = lines[idx].lstrip()[:3]
+                idx += 1
+                while idx < len(lines):
+                    if quote in lines[idx]:
+                        idx += 1
+                        break
+                    idx += 1
+            before = "\n".join(lines[:idx]).rstrip("\n")
+            after = "\n".join(lines[idx:])
+            if before:
+                return before + "\n" + block + after
+            return block + after
+
+        # 将 import 注入块放在文件顶部（但避开 shebang/编码注释/模块 docstring）
+        injected = _insert_import_block(code, import_block)
+        # 保存逻辑放在末尾
+        return injected + runtime_block + save_code
     
     def _execute_code(self, code: str) -> CodeExecutionResult:
         """
@@ -674,7 +705,9 @@ _dj_save_current_figure()
                 cwd=str(self.sandbox_path),
                 env={
                     **os.environ,
-                    "PYTHONIOENCODING": "utf-8"
+                    "PYTHONIOENCODING": "utf-8",
+                    # 强制 matplotlib 使用无界面后端，避免 macOS GUI 阻塞
+                    "MPLBACKEND": "Agg"
                 }
             )
             
