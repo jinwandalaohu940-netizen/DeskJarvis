@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "identifier": "com.deskjarvis.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run dev:force",
     "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420"
   },
