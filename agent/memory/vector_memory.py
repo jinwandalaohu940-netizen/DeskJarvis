@@ -17,41 +17,30 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# 尝试导入向量库依赖
-try:
-    import chromadb
-    CHROMA_AVAILABLE = True
-except ImportError:
-    CHROMA_AVAILABLE = False
-    logger.warning("chromadb 未安装，向量记忆功能不可用。请运行: pip install chromadb")
-
-try:
-    from sentence_transformers import SentenceTransformer
-    EMBEDDINGS_AVAILABLE = True
-except ImportError:
-    EMBEDDINGS_AVAILABLE = False
-    logger.warning("sentence-transformers 未安装，请运行: pip install sentence-transformers")
-
 
 class VectorMemory:
     """向量记忆 - Chroma 存储"""
     
-    def __init__(self, db_path: Optional[Path] = None, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        auto_install: bool = True,
+    ):
         """
         初始化向量记忆
         
         Args:
             db_path: 数据库路径，默认 ~/.deskjarvis/vector_memory
             model_name: 嵌入模型名称
+            auto_install: 是否在缺失依赖时自动安装（需要网络）
         """
-        if not CHROMA_AVAILABLE:
-            logger.error("chromadb 不可用，向量记忆功能禁用")
-            self.enabled = False
-            return
-        
-        if not EMBEDDINGS_AVAILABLE:
-            logger.error("sentence-transformers 不可用，向量记忆功能禁用")
-            self.enabled = False
+        self.enabled = False
+        self._chromadb = None
+        self._SentenceTransformer = None
+
+        ok = self._ensure_dependencies(auto_install=auto_install)
+        if not ok:
             return
         
         self.enabled = True
@@ -64,18 +53,136 @@ class VectorMemory:
         
         # 初始化嵌入模型
         logger.info(f"加载嵌入模型: {model_name}")
-        self.model = SentenceTransformer(model_name)
+        # mypy/类型：运行时注入
+        self.model = self._SentenceTransformer(model_name)  # type: ignore[misc]
         
         # 初始化 Chroma（使用新的持久化 API）
         try:
-            self.client = chromadb.PersistentClient(path=str(self.db_path))
+            self.client = self._chromadb.PersistentClient(path=str(self.db_path))  # type: ignore[union-attr]
         except Exception as e:
             logger.warning(f"Chroma PersistentClient 初始化失败: {e}，尝试使用 EphemeralClient")
-            self.client = chromadb.EphemeralClient()
+            self.client = self._chromadb.EphemeralClient()  # type: ignore[union-attr]
         
         # 创建集合
         self._init_collections()
         logger.info(f"向量记忆已初始化: {self.db_path}")
+
+    def _ensure_dependencies(self, auto_install: bool = True) -> bool:
+        """
+        确保向量记忆依赖可用；必要时尝试用当前 Python 解释器自动安装。
+
+        注意：
+        - DeskJarvis 可能使用 python3.12 启动，但用户只在 python3.11 里安装了依赖。
+        - 自动安装需要网络，且首次使用 sentence-transformers 还会下载模型文件（会缓存到用户目录）。
+
+        Args:
+            auto_install: 是否允许自动安装
+
+        Returns:
+            依赖是否可用
+        """
+        import importlib
+        import os
+        import subprocess
+        import sys
+
+        def try_import() -> Tuple[bool, Optional[str]]:
+            try:
+                chromadb_mod = importlib.import_module("chromadb")
+            except Exception as e:
+                return False, "chromadb"
+            try:
+                st_mod = importlib.import_module("sentence_transformers")
+                st_cls = getattr(st_mod, "SentenceTransformer", None)
+                if st_cls is None:
+                    return False, "sentence-transformers"
+            except Exception:
+                return False, "sentence-transformers"
+
+            self._chromadb = chromadb_mod
+            self._SentenceTransformer = st_cls
+            return True, None
+
+        ok, missing = try_import()
+        if ok:
+            return True
+
+        logger.warning(f"{missing} 未安装，向量记忆功能不可用。")
+
+        # 防止每次启动都反复尝试安装（用一个标记文件）
+        marker_dir = Path.home() / ".deskjarvis"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        marker_file = marker_dir / "vector_deps_install_attempted.txt"
+
+        if not auto_install:
+            self._log_install_hint(missing or "unknown")
+            self.enabled = False
+            return False
+
+        if marker_file.exists():
+            # 已尝试过自动安装但仍失败，避免死循环
+            self._log_install_hint(missing or "unknown")
+            self.enabled = False
+            return False
+
+        try:
+            marker_file.write_text(datetime.now().isoformat(), encoding="utf-8")
+        except Exception:
+            pass
+
+        # 尝试自动安装
+        packages = []
+        if missing == "chromadb":
+            packages = ["chromadb"]
+        elif missing == "sentence-transformers":
+            packages = ["sentence-transformers"]
+        else:
+            packages = ["chromadb", "sentence-transformers"]
+
+        logger.info("尝试自动安装向量记忆依赖: " + ", ".join(packages))
+        try:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade"]
+            cmd.extend(packages)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if result.returncode != 0:
+                logger.error("自动安装失败: " + (result.stderr or result.stdout or "未知错误"))
+                self._log_install_hint(missing or "unknown")
+                self.enabled = False
+                return False
+
+            # 安装成功后重试导入
+            ok2, missing2 = try_import()
+            if not ok2:
+                logger.error(f"自动安装后仍无法导入: {missing2}")
+                self._log_install_hint(missing2 or "unknown")
+                self.enabled = False
+                return False
+
+            logger.info("向量记忆依赖已自动安装完成")
+            return True
+        except Exception as e:
+            logger.error(f"自动安装依赖异常: {e}")
+            self._log_install_hint(missing or "unknown")
+            self.enabled = False
+            return False
+
+    def _log_install_hint(self, missing: str) -> None:
+        """
+        输出更明确的安装提示（强调必须用 DeskJarvis 实际运行的 Python 解释器）。
+
+        Args:
+            missing: 缺失的包名
+        """
+        import sys
+
+        # DeskJarvis 启动的解释器就是 sys.executable
+        hint = (
+            "向量记忆依赖缺失: " + missing + "。\n"
+            "请使用 DeskJarvis 当前 Python 解释器安装依赖（非常重要！）：\n"
+            + sys.executable + " -m pip install -r requirements.txt\n"
+            "如果你在别的 Python 版本里安装过（例如 python3.11），DeskJarvis 仍可能用 python3.12 启动，从而找不到包。"
+        )
+        logger.error(hint)
     
     def _init_collections(self):
         """初始化向量集合"""

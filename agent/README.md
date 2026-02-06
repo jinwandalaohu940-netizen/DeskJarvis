@@ -6,7 +6,13 @@
 
 ```bash
 # 安装Python依赖
-pip install -r requirements.txt
+python3.12 -m pip install -r requirements.txt
+
+# 或者使用 DeskJarvis 实际运行的解释器（非常重要！）
+# 由于 Tauri 后端会优先尝试 python3.12，如果你只在 python3.11 里装过依赖，
+# DeskJarvis 运行时仍可能报 “sentence-transformers 未安装” 等错误。
+# 你可以在日志里看到当前解释器路径，然后用它执行：
+# /path/to/python -m pip install -r requirements.txt
 
 # 安装Playwright浏览器
 playwright install chromium
