@@ -189,7 +189,7 @@ class ClaudePlanner(BasePlanner):
 - browser_click: 点击元素，params: {{selector: "..."}} 或 {{text: "..."}}
 - browser_input: 输入文本，params: {{selector: "...", text: "..."}}
 - browser_screenshot: 截取当前页面，params: {{}}
-- download_file: 下载文件，params: {{url: "...", save_path: "..."}}
+- download_file: 下载文件（通过浏览器点击下载链接），params: {{selector: "..."}} 或 {{text: "..."}}, 可选 {{save_path: "保存路径/目录"}}, {{timeout: 60000}}
 - request_login: 请求用户登录（弹出登录对话框），params: {{site_name: "网站名", username_selector: "用户名输入框选择器", password_selector: "密码输入框选择器", submit_selector: "提交按钮选择器（可选）"}}
 - request_captcha: 请求验证码（截取验证码图片并弹出输入框），params: {{site_name: "网站名", captcha_image_selector: "验证码图片选择器", captcha_input_selector: "验证码输入框选择器"}}
 
@@ -221,6 +221,9 @@ class ClaudePlanner(BasePlanner):
 - mouse_click: 鼠标点击，params: {{x: 100, y: 200}}
 - window_minimize: 最小化窗口，params: {{app_name: "应用名（可选）"}}
 - window_maximize: 最大化窗口，params: {{app_name: "应用名（可选）"}}
+
+**下载工具（推荐，避免脚本语法错误）**：
+- download_latest_python_installer: 下载最新 Python 安装包，params: {{save_dir: "保存目录（可选，默认桌面）"}} 或 {{save_path: "保存路径/目录（可选）"}}, 可选 {{timeout: 180000}}
 
 **系统信息和图片处理**：
 - get_system_info: 获取系统信息，params: {{info_type: "battery/disk/memory/apps/network/all", save_path: "~/Desktop/系统报告.md（可选，指定后自动保存）"}}

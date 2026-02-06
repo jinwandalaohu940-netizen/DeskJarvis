@@ -4,7 +4,7 @@
 遵循 docs/ARCHITECTURE.md 中的Executor模块规范
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 import sys
 import subprocess
@@ -181,6 +181,9 @@ class SystemTools:
                 return self._get_system_info(params)
             elif step_type == "image_process":
                 return self._image_process(params)
+            # ========== 下载 ==========
+            elif step_type == "download_latest_python_installer":
+                return self._download_latest_python_installer(params)
             # ========== 定时提醒 ==========
             elif step_type == "set_reminder":
                 return self._set_reminder(params)
@@ -219,6 +222,211 @@ class SystemTools:
                 "message": f"操作失败: {e}",
                 "data": None
             }
+
+    def _resolve_user_path(self, path_str: str, default_base: Optional[Path] = None) -> Path:
+        """
+        将用户输入的路径解析为绝对路径，并限制在用户主目录下。
+
+        Args:
+            path_str: 用户输入路径（支持 ~、相对路径）
+            default_base: 相对路径的基准目录，默认用户主目录
+
+        Returns:
+            解析后的绝对路径
+
+        Raises:
+            BrowserError: 路径不在用户主目录下
+        """
+        home = Path.home()
+        base = default_base or home
+
+        path_str = (path_str or "").strip()
+        if not path_str:
+            raise BrowserError("路径不能为空")
+
+        if path_str.startswith("~/"):
+            path_str = str(home / path_str[2:])
+        elif path_str.startswith("~"):
+            path_str = str(home / path_str[1:])
+
+        path = Path(path_str)
+        if not path.is_absolute():
+            path = base / path
+
+        path = path.resolve()
+
+        try:
+            path.relative_to(home)
+        except ValueError as e:
+            raise BrowserError(f"路径不在允许的范围内（仅允许用户主目录下）: {path}") from e
+
+        return path
+
+    def _fetch_latest_python_version(self, timeout: int = 30) -> str:
+        """
+        从 python.org 获取最新 Python 3 版本号。
+
+        Args:
+            timeout: 超时秒数
+
+        Returns:
+            版本号字符串，例如 "3.13.1"
+        """
+        import re
+        import requests
+
+        url = "https://www.python.org/downloads/"
+        logger.info(f"获取最新 Python 版本: {url}")
+        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "DeskJarvis/1.0"})
+        resp.raise_for_status()
+
+        # 常见页面格式：Latest Python 3 Release - Python 3.x.y
+        m = re.search(r"Latest Python 3 Release\s*-\s*Python\s+(\d+\.\d+\.\d+)", resp.text)
+        if m:
+            return m.group(1)
+
+        # 回退：抓第一个 “Download Python 3.x.y”
+        m2 = re.search(r"Download Python\s+(\d+\.\d+\.\d+)", resp.text)
+        if m2:
+            return m2.group(1)
+
+        raise BrowserError("无法从 python.org 解析最新 Python 版本号")
+
+    def _pick_python_installer_filename(self, version: str) -> Tuple[str, str]:
+        """
+        根据当前平台选择 Python 安装包文件名候选，并返回首个可用项。
+
+        Args:
+            version: Python 版本号，如 "3.13.1"
+
+        Returns:
+            (filename, download_url)
+        """
+        import requests
+
+        base_url = f"https://www.python.org/ftp/python/{version}/"
+        platform = sys.platform
+
+        if platform == "darwin":
+            candidates = [
+                f"python-{version}-macos11.pkg",
+                f"python-{version}-macos10.9.pkg",
+                f"python-{version}-macosx10.9.pkg",
+            ]
+        elif platform == "win32":
+            candidates = [
+                f"python-{version}-amd64.exe",
+                f"python-{version}-amd64-webinstall.exe",
+            ]
+        elif platform.startswith("linux"):
+            candidates = [
+                f"Python-{version}.tar.xz",
+                f"Python-{version}.tgz",
+            ]
+        else:
+            raise BrowserError(f"不支持的操作系统: {platform}")
+
+        for filename in candidates:
+            url = base_url + filename
+            try:
+                r = requests.head(url, timeout=15, allow_redirects=True, headers={"User-Agent": "DeskJarvis/1.0"})
+                if r.status_code == 200:
+                    return filename, url
+            except Exception:
+                continue
+
+        raise BrowserError("未找到可用的 Python 安装包文件（可能是版本/平台文件名规则变化）")
+
+    def _download_latest_python_installer(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        下载最新 Python 安装包（确定性工具，不依赖 AI 生成脚本）。
+
+        Params:
+            - save_dir: 保存目录（可选，默认桌面）
+            - save_path: 保存路径（可选，若提供则优先使用；可为目录或完整文件路径）
+            - timeout: 超时毫秒（可选，默认 180000）
+
+        Returns:
+            dict: {"success": bool, "message": str, "data": {...}}
+        """
+        import requests
+
+        timeout_ms = int(params.get("timeout", 180000))
+        timeout_s = max(10, timeout_ms // 1000)
+
+        home = Path.home()
+        desktop = home / "Desktop"
+        desktop.mkdir(parents=True, exist_ok=True)
+
+        save_path_param = params.get("save_path")
+        save_dir_param = params.get("save_dir")
+
+        # 1) 解析目标保存目录/路径
+        target_base = desktop
+        if save_dir_param:
+            target_base = self._resolve_user_path(str(save_dir_param), default_base=home)
+            target_base.mkdir(parents=True, exist_ok=True)
+
+        explicit_path: Optional[Path] = None
+        if save_path_param:
+            explicit_path = self._resolve_user_path(str(save_path_param), default_base=target_base)
+
+        # 2) 获取最新版本并选择安装包
+        version = self._fetch_latest_python_version(timeout=30)
+        filename, download_url = self._pick_python_installer_filename(version)
+
+        # 3) 确定最终保存路径
+        if explicit_path is not None:
+            if explicit_path.exists() and explicit_path.is_dir():
+                file_path = explicit_path / filename
+            else:
+                # 如果看起来像目录（以分隔符结尾），也当目录处理
+                if str(save_path_param).endswith("/") or str(save_path_param).endswith("\\"):
+                    explicit_path.mkdir(parents=True, exist_ok=True)
+                    file_path = explicit_path / filename
+                else:
+                    # 若用户给的是文件名但没扩展名，也保留原样；这里不强行改名
+                    explicit_path.parent.mkdir(parents=True, exist_ok=True)
+                    file_path = explicit_path
+        else:
+            file_path = target_base / filename
+
+        logger.info(f"准备下载 Python 安装包: version={version}, url={download_url}")
+        logger.info(f"保存路径: {file_path}")
+
+        # 4) 下载（stream）
+        try:
+            with requests.get(download_url, stream=True, timeout=(30, timeout_s), headers={"User-Agent": "DeskJarvis/1.0"}) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("Content-Length", "0") or "0")
+                written = 0
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(file_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 256):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        written += len(chunk)
+                if total > 0 and written == 0:
+                    raise BrowserError("下载失败：写入 0 字节")
+
+            if not file_path.exists() or file_path.stat().st_size == 0:
+                raise BrowserError("下载失败：文件未生成或大小为 0")
+
+            size_bytes = file_path.stat().st_size
+            return {
+                "success": True,
+                "message": "已下载最新 Python 安装包: " + str(file_path),
+                "data": {
+                    "version": version,
+                    "url": download_url,
+                    "file_path": str(file_path),
+                    "size_bytes": size_bytes,
+                },
+            }
+        except Exception as e:
+            logger.error(f"下载 Python 安装包失败: {e}", exc_info=True)
+            return {"success": False, "message": "下载 Python 安装包失败: " + str(e), "data": None}
     
     def _screenshot_desktop(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -631,6 +631,7 @@ class DeskJarvisAgent:
                               "mouse_click", "mouse_move",
                               "window_minimize", "window_maximize", "window_close",
                               "get_system_info", "image_process",
+                              "download_latest_python_installer",
                               "set_reminder", "list_reminders", "cancel_reminder",
                               "create_workflow", "list_workflows", "delete_workflow",
                               "get_task_history", "search_history",

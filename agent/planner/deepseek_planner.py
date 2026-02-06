@@ -206,7 +206,8 @@ class DeepSeekPlanner(BasePlanner):
 - browser_click: 点击元素 → params: {{"selector": "选择器"}}
 - browser_fill: 填写表单 → params: {{"selector": "选择器", "value": "值"}}
 - browser_screenshot: 截图网页 → params: {{"save_path": "保存路径"}}
-- download_file: 下载文件 → params: {{"url": "下载链接", "save_path": "保存路径"}}
+- download_file: 下载文件（通过浏览器点击下载链接）→ params: {{"selector": "下载按钮/链接选择器"}} 或 {{"text": "下载按钮文字"}}，可选 {{"save_path": "保存路径/目录"}}, {{"timeout": 60000}}
+- download_latest_python_installer: 下载最新 Python 安装包（推荐，避免脚本出错）→ params: {{"save_dir": "保存目录（可选，默认桌面）"}} 或 {{"save_path": "保存路径/目录（可选）"}}, 可选 {{"timeout": 180000}}
 - execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
 
 **登录和验证码工具**（遇到需要登录或验证码的网站时使用）：
