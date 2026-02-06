@@ -1,0 +1,31 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+fix = false
+
+[tool.ruff.lint]
+# 先从“高价值低噪音”的规则集开始：语法/未定义/常见 bug
+# 说明：现有代码库尚未完全类型化/统一风格，过严会导致 CI 噪音过大。
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_ignores = true
+no_implicit_optional = false
+check_untyped_defs = false
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+  "agent.memory.vector_memory",
+  "agent.crew.*",
+  "agent.scheduler",
+  "agent.workflows",
+  "agent.history",
+  "agent.user_input",
+]
+ignore_errors = true
+

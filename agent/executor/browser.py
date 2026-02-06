@@ -87,7 +87,7 @@ class BrowserExecutor:
         except Exception as e:
             error_msg = f"启动浏览器失败: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def stop(self) -> None:
         """停止浏览器实例"""
@@ -207,7 +207,7 @@ class BrowserExecutor:
         except Exception as e:
             error_msg = f"导航失败: {url} - {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _click(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -260,7 +260,7 @@ class BrowserExecutor:
                 locator = self.page.locator(selector)
             
             # 步骤2: 等待元素出现并可见（关键修复）
-            logger.info(f"等待元素可见...")
+            logger.info("等待元素可见...")
             
             # 检查有多少个匹配元素
             # 使用 all() 方法获取所有匹配的元素，然后获取长度（更可靠）
@@ -309,7 +309,7 @@ class BrowserExecutor:
             
             if not visible_locator:
                 # 如果都不可见，尝试滚动到第一个并等待
-                logger.warning(f"所有匹配元素都不可见，尝试滚动到第一个元素")
+                logger.warning("所有匹配元素都不可见，尝试滚动到第一个元素")
                 first_locator = locator.first
                 # 滚动到元素（关键修复）
                 first_locator.scroll_into_view_if_needed(timeout=timeout)
@@ -324,14 +324,14 @@ class BrowserExecutor:
             visible_locator.wait_for(state="attached", timeout=5000)
             
             # 步骤6: 执行点击
-            logger.info(f"执行点击...")
+            logger.info("执行点击...")
             visible_locator.click(timeout=timeout)
             
-            logger.info(f"✅ 已成功点击元素")
+            logger.info("✅ 已成功点击元素")
             
             return {
                 "success": True,
-                "message": f"已点击元素",
+                "message": "已点击元素",
                 "data": {"selector": selector, "text": text, "matched_count": count}
             }
             
@@ -346,7 +346,7 @@ class BrowserExecutor:
             
             error_msg = f"点击元素失败: {selector or text} - {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _fill(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """填写表单字段"""
@@ -429,13 +429,13 @@ class BrowserExecutor:
                         self.page.keyboard.type(str(value), delay=50)
                     except Exception:
                         # 方法4：强制点击
-                        self.page.evaluate(f'''
+                        self.page.evaluate('''
                             var input = document.querySelector("#kw") || document.querySelector("input[name='wd']");
                             if (input) {{ input.focus(); input.click(); }}
                         ''')
                         self.page.keyboard.type(str(value), delay=50)
             
-            logger.info(f"✅ 已填写字段")
+            logger.info("✅ 已填写字段")
             
             return {
                 "success": True,
@@ -445,7 +445,7 @@ class BrowserExecutor:
         except Exception as e:
             error_msg = f"填写字段失败: {selector} - {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _handle_baidu_popups(self):
         """处理百度页面的各种弹窗"""
@@ -506,17 +506,17 @@ class BrowserExecutor:
         try:
             logger.info(f"等待 {timeout} 毫秒...")
             self.page.wait_for_timeout(timeout)
-            logger.info(f"✅ 等待完成")
+            logger.info("✅ 等待完成")
             
             return {
                 "success": True,
-                "message": f"等待完成",
+                "message": "等待完成",
                 "data": {"timeout": timeout}
             }
         except Exception as e:
             error_msg = f"等待失败: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _screenshot(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -562,7 +562,7 @@ class BrowserExecutor:
         try:
             logger.info(f"浏览器页面截图保存到: {save_path}")
             self.page.screenshot(path=str(save_path), full_page=True)
-            logger.info(f"✅ 浏览器页面截图已保存")
+            logger.info("✅ 浏览器页面截图已保存")
             
             return {
                 "success": True,
@@ -572,7 +572,7 @@ class BrowserExecutor:
         except Exception as e:
             error_msg = f"浏览器页面截图失败: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _download_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -707,7 +707,7 @@ class BrowserExecutor:
             
             if not visible_locator:
                 # 如果都不可见，尝试滚动到第一个并等待
-                logger.warning(f"所有匹配元素都不可见，尝试滚动到第一个元素")
+                logger.warning("所有匹配元素都不可见，尝试滚动到第一个元素")
                 visible_locator = locator.first
                 visible_locator.scroll_into_view_if_needed(timeout=timeout)
                 visible_locator.wait_for(state="visible", timeout=timeout)
@@ -727,14 +727,11 @@ class BrowserExecutor:
             download = download_info.value
             # 在 Playwright 同步 API 中，suggested_filename 是属性，不是方法
             # 但为了兼容性，先检查是否是方法
-            if hasattr(download, 'suggested_filename'):
-                suggested_filename_attr = getattr(download, 'suggested_filename')
-                if callable(suggested_filename_attr):
-                    suggested_filename = suggested_filename_attr()
-                else:
-                    suggested_filename = suggested_filename_attr
-            else:
-                # 如果没有 suggested_filename，使用默认名称
+            try:
+                suggested_filename = download.suggested_filename  # 属性（同步 API）
+                if callable(suggested_filename):
+                    suggested_filename = suggested_filename()
+            except Exception:
                 suggested_filename = "download"
             logger.info(f"检测到下载: {suggested_filename}")
             
@@ -805,7 +802,7 @@ class BrowserExecutor:
             selector_str = selector or text or "未提供selector或text"
             error_msg = f"下载文件失败: {selector_str} - {str(e)}"
             logger.error(error_msg, exc_info=True)
-            raise BrowserError(error_msg)
+            raise BrowserError(error_msg) from e
     
     def _handle_download(self, download) -> None:
         """处理下载事件"""
@@ -954,11 +951,11 @@ class BrowserExecutor:
                     self.page.keyboard.press("Enter")
                     self.page.wait_for_timeout(2000)
             
-            logger.info(f"✅ 登录信息已填写")
+            logger.info("✅ 登录信息已填写")
             
             return {
                 "success": True,
-                "message": f"已填写登录信息",
+                "message": "已填写登录信息",
                 "data": {"site_name": site_name}
             }
             
@@ -1018,7 +1015,7 @@ class BrowserExecutor:
                 if element.is_visible(timeout=1000):
                     logger.info(f"找到登录链接: {selector}")
                     element.click(timeout=5000)
-                    logger.info(f"✅ 已点击登录链接")
+                    logger.info("✅ 已点击登录链接")
                     return True
             except Exception as e:
                 logger.debug(f"点击登录链接失败 ({selector}): {e}")
@@ -1059,7 +1056,7 @@ class BrowserExecutor:
             captcha_base64 = base64.b64encode(captcha_bytes).decode("utf-8")
             captcha_data_url = f"data:image/png;base64,{captcha_base64}"
             
-            logger.info(f"验证码图片已截取")
+            logger.info("验证码图片已截取")
             
             # 请求用户输入验证码
             captcha_text = self.user_input_manager.request_captcha(
@@ -1079,11 +1076,11 @@ class BrowserExecutor:
             logger.info(f"填写验证码: {captcha_input_selector}")
             self.page.fill(captcha_input_selector, captcha_text, timeout=10000)
             
-            logger.info(f"✅ 验证码已填写")
+            logger.info("✅ 验证码已填写")
             
             return {
                 "success": True,
-                "message": f"已填写验证码",
+                "message": "已填写验证码",
                 "data": {"captcha": captcha_text}
             }
             

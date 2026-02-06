@@ -5,10 +5,12 @@
 import pytest
 from pathlib import Path
 import sys
+import json
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agent.tools.config import Config
+from agent.tools.exceptions import ConfigError
 
 
 class TestConfigModels:
@@ -51,6 +53,57 @@ class TestDefaultConfig:
     def test_default_provider(self):
         """测试默认提供商"""
         assert Config.DEFAULT_CONFIG["provider"] in Config.DEFAULT_MODELS
+
+
+class TestConfigIOAndProperties:
+    """Config 读写与属性行为测试（提高覆盖率，防止回归）"""
+
+    def test_creates_default_config_when_missing(self, tmp_path: Path):
+        cfg_path = tmp_path / "config.json"
+        assert not cfg_path.exists()
+        cfg = Config(config_path=str(cfg_path))
+        assert cfg_path.exists()
+        assert cfg.provider in Config.DEFAULT_MODELS
+        assert isinstance(cfg.sandbox_path, Path)
+
+    def test_validate_requires_api_key(self, tmp_path: Path):
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        cfg.set("api_key", "")
+        cfg.save()
+        assert cfg.validate() is False
+        cfg.set("api_key", "test-key")
+        cfg.save()
+        assert cfg.validate() is True
+
+    def test_model_fallback_by_provider(self, tmp_path: Path):
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        cfg.set("provider", "deepseek")
+        cfg.set("model", "")  # 触发 fallback
+        cfg.save()
+        # 重新加载验证 fallback 生效
+        cfg2 = Config(config_path=str(cfg_path))
+        assert cfg2.provider == "deepseek"
+        assert cfg2.model == Config.DEFAULT_MODELS["deepseek"]
+
+    def test_auto_confirm_and_log_level_defaults(self, tmp_path: Path):
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        assert cfg.auto_confirm is False
+        assert cfg.log_level == "INFO"
+        cfg.set("auto_confirm", True)
+        cfg.set("log_level", "DEBUG")
+        cfg.save()
+        cfg2 = Config(config_path=str(cfg_path))
+        assert cfg2.auto_confirm is True
+        assert cfg2.log_level == "DEBUG"
+
+    def test_invalid_json_raises_config_error(self, tmp_path: Path):
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text("{invalid json", encoding="utf-8")
+        with pytest.raises(ConfigError):
+            Config(config_path=str(cfg_path))
 
 
 if __name__ == "__main__":

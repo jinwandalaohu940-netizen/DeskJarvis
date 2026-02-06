@@ -4,12 +4,11 @@
 遵循 docs/ARCHITECTURE.md 中的Executor模块规范
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 from pathlib import Path
 import shutil
-from datetime import datetime, timedelta
-import os
+from datetime import datetime
 import time
 from agent.tools.exceptions import FileManagerError
 from agent.tools.config import Config
@@ -164,7 +163,7 @@ class FileManager:
             
             # 验证文件大小一致
             if source.stat().st_size != target.stat().st_size:
-                raise FileManagerError(f"文件大小不一致，复制可能失败")
+                raise FileManagerError("文件大小不一致，复制可能失败")
             
             # 只有在确认复制成功后才删除源文件
             source.unlink()
@@ -175,10 +174,10 @@ class FileManager:
             if target.exists():
                 try:
                     target.unlink()
-                except:
+                except Exception:
                     pass
             
-            raise FileManagerError(f"移动文件失败: {e}")
+            raise FileManagerError(f"移动文件失败: {e}") from e
     
     def execute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -513,7 +512,7 @@ class FileManager:
             
         except Exception as e:
             logger.error(f"批量整理文件失败: {e}", exc_info=True)
-            raise FileManagerError(f"批量整理文件失败: {e}")
+            raise FileManagerError(f"批量整理文件失败: {e}") from e
     
     def _find_file(self, filename: str, search_dirs: List[Path] = None) -> Optional[Path]:
         """

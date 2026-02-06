@@ -11,6 +11,7 @@
 """
 
 import subprocess
+import os
 import sys
 import re
 import json
@@ -19,7 +20,9 @@ import time
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from agent.executor.script_validator import ScriptValidator
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +34,10 @@ class CodeExecutionResult:
     message: str
     output: str = ""
     error: str = ""
-    images: List[str] = None  # 图表路径列表
+    images: List[str] = field(default_factory=list)  # 图表路径列表
     data: Any = None
     execution_time: float = 0.0
-    installed_packages: List[str] = None  # 自动安装的包
+    installed_packages: List[str] = field(default_factory=list)  # 自动安装的包
     
 
 class CodeInterpreter:
@@ -100,6 +103,7 @@ class CodeInterpreter:
         self.scripts_dir = sandbox_path / "scripts"
         self.output_dir = sandbox_path / "outputs"
         self.code_history: List[Dict] = []
+        self.validator = ScriptValidator(sandbox_path)
         
         # 创建必要的目录
         self.scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +151,8 @@ class CodeInterpreter:
             )
         # 使用修复后的代码
         code = syntax_check[2]
+
+        # 1.6 脚本验证移动到重试循环中（便于自动修复/重试）
         
         # 2. 分析并安装缺失的包
         if auto_install:
@@ -163,7 +169,7 @@ class CodeInterpreter:
         enhanced_code = self._inject_plot_capture(code)
         
         # 4. 执行代码（带重试）
-        result = None
+        result: Optional[CodeExecutionResult] = None
         last_error = ""
         
         for attempt in range(max_retries + 1):
@@ -171,6 +177,27 @@ class CodeInterpreter:
                 self._emit_progress("retrying", f"第 {attempt + 1} 次尝试执行...")
                 # 尝试自动修复错误
                 enhanced_code = self._try_fix_error(enhanced_code, last_error)
+
+            # 3.5 执行前验证（lint/契约/dry-run）
+            validation = self.validator.validate(
+                enhanced_code,
+                lint=True,
+                require_json_output=False,
+                dry_run=True,
+                dry_run_timeout_sec=2,
+            )
+            if not validation.ok:
+                last_error = "脚本验证失败: " + validation.message
+                if validation.details:
+                    last_error = last_error + "\n" + validation.details
+                # 还有重试机会就继续（让 _try_fix_error 有机会修）
+                if attempt < max_retries:
+                    continue
+                return CodeExecutionResult(
+                    success=False,
+                    message="脚本验证失败: " + validation.message,
+                    error=last_error,
+                )
             
             result = self._execute_code(enhanced_code)
             
@@ -190,13 +217,29 @@ class CodeInterpreter:
         
         # 6. 记录执行历史
         execution_time = time.time() - start_time
+        if result is None:
+            # 理论上不应该发生，但为了健壮性兜底
+            result = CodeExecutionResult(
+                success=False,
+                message="执行失败: 未获取到执行结果",
+                error="No result",
+            )
         self._record_execution(code, result, execution_time)
         
         # 7. 返回增强的结果
+        if result is None:
+            return CodeExecutionResult(
+                success=False,
+                message="执行失败: 未获取到执行结果",
+                error="No result",
+                execution_time=execution_time,
+                installed_packages=installed_packages,
+            )
+
         result.images = images
         result.execution_time = execution_time
         result.installed_packages = installed_packages
-        
+
         return result
     
     def _decode_script(self, script: str) -> str:
@@ -290,7 +333,7 @@ class CodeInterpreter:
         # (这里只做基本检查，实际执行时也会限制)
         if "/etc/" in code or "/root/" in code or "/Users/" in code:
             # 检查是否是相对路径
-            if not str(self.sandbox_path) in code:
+            if str(self.sandbox_path) not in code:
                 logger.warning("代码可能访问沙盒外路径，但允许执行")
         
         return True, ""
@@ -303,8 +346,6 @@ class CodeInterpreter:
             (is_valid, error_message, fixed_code)
         """
         import ast
-        import py_compile
-        import tempfile
         
         try:
             ast.parse(code)
@@ -346,7 +387,7 @@ class CodeInterpreter:
                     return False, msg, code
                 logger.info("语法错误已自动修复")
                 return True, "", fixed_code
-            except SyntaxError as e2:
+            except SyntaxError:
                 return False, self._format_syntax_error(code, e), code
 
     def _py_compile_check(self, code: str) -> Tuple[bool, str]:
@@ -596,7 +637,7 @@ _dj_save_current_figure()
                 timeout=300,
                 cwd=str(self.sandbox_path),
                 env={
-                    **subprocess.os.environ,
+                    **os.environ,
                     "PYTHONIOENCODING": "utf-8"
                 }
             )

@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.tools.config import Config
 from agent.tools.logger import setup_logger
-from agent.tools.exceptions import DeskJarvisError
 from agent.planner.planner_factory import create_planner
 from agent.executor.browser import BrowserExecutor
 from agent.executor.file_manager import FileManager
@@ -33,7 +32,7 @@ from agent.memory import MemoryManager
 
 # 多代理协作（可选）
 try:
-    from agent.crew import CrewManager, TaskComplexityAnalyzer
+    from agent.crew import CrewManager
     CREW_AVAILABLE = True
 except ImportError:
     CREW_AVAILABLE = False
@@ -683,7 +682,7 @@ def main():
         if args.context:
             try:
                 context = json.loads(args.context)
-            except:
+            except Exception:
                 pass
         
         agent = DeskJarvisAgent(config)

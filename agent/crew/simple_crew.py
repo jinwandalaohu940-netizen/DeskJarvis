@@ -7,8 +7,7 @@ DeskJarvis 简化版多代理协作系统
 import json
 import logging
 import time
-from typing import Dict, Any, Optional, List, Callable
-from pathlib import Path
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +229,7 @@ class SimpleCrew:
                 
                 plan = json.loads(json_str)
                 steps = plan.get("steps", [])
-            except:
+            except Exception:
                 # 如果解析失败，创建一个默认步骤
                 steps = [{"step": 1, "action": instruction, "type": "execute"}]
             
@@ -283,7 +282,7 @@ class SimpleCrew:
             
             self._emit_progress("agent_progress", {
                 "agent": "Executor",
-                "message": f"所有步骤执行完成"
+                "message": "所有步骤执行完成"
             })
             
             # ========== Step 3: 总结 ==========

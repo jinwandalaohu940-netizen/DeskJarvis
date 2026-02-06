@@ -4,7 +4,6 @@
 遵循 docs/ARCHITECTURE.md 中的Planner模块规范
 """
 
-from typing import Optional
 import logging
 from agent.tools.config import Config
 from agent.tools.exceptions import PlannerError

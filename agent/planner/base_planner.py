@@ -381,7 +381,7 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                         last_bracket = content.rfind(']')
                         if last_bracket != -1 and last_bracket > script_match_end:
                             content = content[:last_bracket] + '"' + content[last_bracket:]
-                            logger.info(f"✅ 修复了未闭合的 script 字段（在JSON结束前插入引号）")
+                            logger.info("✅ 修复了未闭合的 script 字段（在JSON结束前插入引号）")
                 
                 # 然后处理 content 字段（如果 script 字段已修复，可能不需要再处理 content）
                 content_pattern = r'"content"\s*:\s*"'
@@ -441,7 +441,7 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                         last_bracket = content.rfind(']')
                         if last_bracket != -1 and last_bracket > match_end:
                             content = content[:last_bracket] + '"' + content[last_bracket:]
-                            logger.info(f"✅ 修复了未闭合的 content 字段（在JSON结束前插入引号）")
+                            logger.info("✅ 修复了未闭合的 content 字段（在JSON结束前插入引号）")
             
             # 尝试解析JSON（可能失败，需要修复）
             steps = None
@@ -541,13 +541,13 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                                                 else:
                                                     # 如果 ] 在 script_start 之前，在末尾添加
                                                     content = content + '"' + '}' + '}' + ']'
-                                            logger.info(f"✅ 通过添加 JSON 结构修复了被截断的 script 字段")
+                                            logger.info("✅ 通过添加 JSON 结构修复了被截断的 script 字段")
                                             try:
                                                 steps = json.loads(content)
                                                 logger.info("✅ 通过添加 JSON 结构成功解析JSON")
                                             except json.JSONDecodeError as e4:
                                                 logger.error(f"添加 JSON 结构后仍然失败: {e4}")
-                                                raise e2
+                                                raise e2 from e4
                                         else:
                                             raise e2
                                 
@@ -575,8 +575,8 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                                                     steps = json.loads(content2)
                                                     logger.info("✅ 通过在最后一个]前插入引号成功解析JSON")
                                                     content = content2
-                                                except:
-                                                    raise e2
+                                                except Exception as e5:
+                                                    raise e2 from e5
                                             else:
                                                 raise e2
                                     else:
@@ -585,10 +585,10 @@ path.parent.mkdir(parents=True, exist_ok=True)  # 确保目录存在
                                 raise e2
                         except Exception as e3:
                             logger.error(f"所有修复尝试都失败: {e3}")
-                            raise e
+                            raise e from e3
                 except Exception as fix_error:
                     logger.error(f"修复JSON时出错: {fix_error}")
-                    raise parse_error
+                    raise parse_error from fix_error
             
             if steps is None:
                 raise ValueError("无法解析JSON")
@@ -721,7 +721,6 @@ except Exception as e:
             
             # 保存实际生成的JSON内容到文件以便调试
             try:
-                import os
                 from pathlib import Path
                 debug_dir = Path.home() / ".deskjarvis" / "debug"
                 debug_dir.mkdir(parents=True, exist_ok=True)

@@ -12,7 +12,7 @@ import logging
 import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import time
 
 logger = logging.getLogger(__name__)
@@ -138,14 +138,13 @@ class VectorMemory:
             依赖是否可用
         """
         import importlib
-        import os
         import subprocess
         import sys
 
         def try_import() -> Tuple[bool, Optional[str]]:
             try:
                 chromadb_mod = importlib.import_module("chromadb")
-            except Exception as e:
+            except Exception:
                 return False, "chromadb"
             try:
                 st_mod = importlib.import_module("sentence_transformers")

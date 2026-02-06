@@ -1,0 +1,24 @@
+[run]
+source = agent
+branch = True
+omit =
+    agent/executor/*
+    agent/crew/*
+    agent/main.py
+    agent/planner/*
+    agent/scheduler.py
+    agent/workflows.py
+    agent/history.py
+    agent/user_input.py
+    agent/memory/advanced_memory.py
+    agent/memory/memory_manager.py
+    agent/memory/vector_memory.py
+    agent/tools/logger.py
+
+[report]
+skip_empty = True
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+

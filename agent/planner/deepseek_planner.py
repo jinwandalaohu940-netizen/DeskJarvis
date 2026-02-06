@@ -110,7 +110,7 @@ class DeepSeekPlanner(BasePlanner):
                         logger.warning(f"⚠️ 步骤 {i} screenshot_desktop：用户要求保存到桌面，但未传递save_path参数，自动添加")
                         step_params['save_path'] = "~/Desktop/screenshot.png"
                         steps[i-1]['params'] = step_params
-                        logger.info(f"✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
+                        logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
             
             return steps
             
@@ -144,7 +144,7 @@ class DeepSeekPlanner(BasePlanner):
             if workflow_suggestion:
                 context_info += "\n\n**工作流建议**：\n"
                 pattern = workflow_suggestion.get("pattern", {})
-                context_info += f"用户经常执行类似任务，建议使用之前成功的步骤模式：\n"
+                context_info += "用户经常执行类似任务，建议使用之前成功的步骤模式：\n"
                 action_seq = pattern.get("action_sequence", [])
                 if action_seq:
                     context_info += f"常用步骤序列：{' → '.join(action_seq)}\n"

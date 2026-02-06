@@ -6,7 +6,6 @@ OpenAI规划器：使用OpenAI API（ChatGPT）规划任务
 
 from typing import List, Dict, Any, Optional
 import logging
-import json
 from openai import OpenAI
 from agent.tools.exceptions import PlannerError
 from agent.tools.config import Config
@@ -106,7 +105,7 @@ class OpenAIPlanner(BasePlanner):
                         logger.warning(f"⚠️ 步骤 {i} screenshot_desktop：用户要求保存到桌面，但未传递save_path参数，自动添加")
                         step_params['save_path'] = "~/Desktop/screenshot.png"
                         steps[i-1]['params'] = step_params
-                        logger.info(f"✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
+                        logger.info("✅ 已自动添加 save_path: ~/Desktop/screenshot.png")
             
             return steps
             

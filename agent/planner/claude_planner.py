@@ -12,7 +12,6 @@ Claude AI规划器 - 简化重构版
 import anthropic
 import logging
 import json
-import base64
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
