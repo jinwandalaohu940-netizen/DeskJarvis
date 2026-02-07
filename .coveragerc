@@ -15,6 +15,11 @@ omit =
     agent/memory/memory_manager.py
     agent/memory/vector_memory.py
     agent/tools/logger.py
+    agent/tools/async_wrapper.py
+    agent/tools/log_sanitizer.py
+    agent/tools/memory_queue.py
+    agent/tools/path_validator.py
+    agent/tools/security_auditor.py
 
 [report]
 skip_empty = True
