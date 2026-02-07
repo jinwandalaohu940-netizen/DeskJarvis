@@ -7,6 +7,7 @@ DeepSeek规划器：使用DeepSeek API规划任务
 from typing import List, Dict, Any, Optional
 import logging
 import json
+import datetime
 from openai import OpenAI
 from agent.tools.exceptions import PlannerError
 from agent.tools.config import Config
@@ -63,7 +64,24 @@ class DeepSeekPlanner(BasePlanner):
             任务步骤列表
         """
         try:
+            # 注入实时时间 (Protocol Phase 38+)
+            # 确保 context 存在
+            if context is None:
+                context = {}
+            current_time = context.get("current_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            # 确保 current_time 被写回 context，供后续使用
+            context["current_time"] = current_time
+            
+            # Protocol G+ 硬性约束：检测模糊词汇，强制插入 list_files
+            needs_grounding = self._check_protocol_g_plus(user_instruction, context)
+            grounding_path = None
+            if needs_grounding:
+                grounding_path = self._infer_directory(user_instruction, context)
+                logger.warning(f"🔵 Protocol G+ 触发：检测到模糊词汇，强制插入 list_files 步骤，路径: {grounding_path}")
+            
+            # Build the prompt with real-time context and Protocol G+ enforcement
             prompt = self._build_prompt(user_instruction, context)
+            
             logger.info("开始规划任务...")
 
             def call_llm(messages):
@@ -131,6 +149,21 @@ class DeepSeekPlanner(BasePlanner):
 
             logger.info(f"规划完成，共 {len(steps)} 个步骤")
             
+            # Protocol G+ 后处理：如果检测到模糊词汇，强制在第一步插入 list_files
+            if needs_grounding and grounding_path:
+                # 检查是否已经有 list_files 步骤
+                has_list_files = any(step.get("type") == "list_files" for step in steps)
+                if not has_list_files:
+                    logger.warning(f"🔵 Protocol G+：强制在第一步插入 list_files({grounding_path})")
+                    list_files_step = {
+                        "type": "list_files",
+                        "action": f"列出目录内容以确认文件位置: {grounding_path}",
+                        "params": {"path": grounding_path},
+                        "description": f"Protocol G+ 强制步骤：检测到模糊词汇，必须先确认目录内容再执行后续操作"
+                    }
+                    steps.insert(0, list_files_step)
+                    logger.info(f"✅ 已插入 list_files 步骤作为第一步")
+            
             # 保存用户指令，用于后处理检查
             user_instruction_lower = user_instruction.lower() if user_instruction else ""
             
@@ -167,6 +200,144 @@ class DeepSeekPlanner(BasePlanner):
             logger.error(f"规划任务失败: {e}", exc_info=True)
             raise PlannerError(f"规划任务失败: {e}")
 
+    def _check_protocol_g_plus(self, instruction: str, context: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        检测是否需要 Protocol G+ 硬性约束
+        
+        Args:
+            instruction: 用户指令
+            context: 上下文信息
+        
+        Returns:
+            如果需要强制插入 list_files，返回 True
+        """
+        # 0. 排除非文件操作场景（视觉操作、系统控制等）
+        non_file_operation_keywords = [
+            "视觉", "截图", "屏幕", "图标", "颜色", "坐标", "位置",
+            "visual_assist", "visual", "screenshot", "screen",
+            "音量", "亮度", "通知", "提醒", "日历", "邮件",
+            "volume", "brightness", "notification", "calendar", "email"
+        ]
+        
+        # 如果指令明显是视觉操作或其他非文件操作，不触发 Protocol G+
+        if any(kw in instruction for kw in non_file_operation_keywords):
+            return False
+        
+        # 1. 检测模糊词汇（仅针对文件相关的模糊词汇）
+        ambiguous_keywords = [
+            "最后一份", "那份", "桌面上的", "刚才的", "最近的", 
+            "那个文件", "这个文件", "它", "这份", "那份文件",
+            "刚才下载的", "最近下载的", "下载的"
+        ]
+        
+        # 注意："桌面"单独处理，需要结合上下文判断
+        
+        # 2. 检测是否涉及文件操作（更精确的关键词）
+        file_operation_keywords = [
+            "分析", "读取", "打开文件", "处理文件", "整理文件", "删除文件", 
+            "移动文件", "复制文件", "重命名文件", "analyze", "read", "open file",
+            "处理文档", "查看文件", "编辑文件", "修改文件",
+            "文件", "文档", "pdf", "docx", "excel", "file", "document"
+        ]
+        
+        # 3. 检查是否包含模糊词汇
+        has_ambiguous = any(kw in instruction for kw in ambiguous_keywords)
+        
+        # 4. 检查"桌面"关键词（需要结合文件操作上下文）
+        has_desktop = "桌面" in instruction or "Desktop" in instruction
+        # 只有当"桌面"与文件操作关键词结合时才认为是文件操作
+        if has_desktop:
+            has_file_op = any(kw in instruction for kw in file_operation_keywords)
+            if not has_file_op:
+                # "桌面"单独出现，且没有文件操作关键词，可能是视觉操作，不触发
+                return False
+        
+        # 5. 检查是否涉及文件操作
+        has_file_op = any(kw in instruction for kw in file_operation_keywords)
+        
+        # 6. 如果同时包含模糊词汇和文件操作，需要 Protocol G+
+        if has_ambiguous and has_file_op:
+            return True
+        
+        # 7. 如果上下文中有 attached_path 或 last_created_file，但指令中使用模糊词汇，也需要 Protocol G+
+        if context:
+            has_context_file = bool(context.get("attached_path") or context.get("last_created_file"))
+            if has_context_file and has_ambiguous and has_file_op:
+                return True
+        
+        return False
+    
+    def _infer_directory(self, instruction: str, context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        从用户指令中推断目录路径（语义路径映射器）
+        
+        Args:
+            instruction: 用户指令
+            context: 上下文信息
+        
+        Returns:
+            推断出的目录路径
+        """
+        # 1. 优先检查上下文中的路径（最准确）
+        if context:
+            attached_path = context.get("attached_path")
+            if attached_path:
+                from pathlib import Path
+                path = Path(attached_path).expanduser()
+                if path.is_dir():
+                    return str(path)
+                elif path.is_file():
+                    return str(path.parent)
+            
+            last_created_file = context.get("last_created_file")
+            if last_created_file:
+                from pathlib import Path
+                path = Path(last_created_file).expanduser()
+                if path.exists():
+                    return str(path.parent)
+        
+        # 2. 语义路径映射（按优先级排序）
+        mapping = {
+            "桌面": "~/Desktop",
+            "Desktop": "~/Desktop",
+            "下载": "~/Downloads",
+            "Downloads": "~/Downloads",
+            "文档": "~/Documents",
+            "Documents": "~/Documents",
+            "图片": "~/Pictures",
+            "Pictures": "~/Pictures",
+            "根目录": "~",
+            "主目录": "~",
+            "home": "~"
+        }
+        
+        instruction_lower = instruction.lower()
+        
+        # 优先匹配更具体的路径（如"桌面"优先于"图片"）
+        priority_order = ["桌面", "Desktop", "下载", "Downloads", "文档", "Documents", "图片", "Pictures"]
+        for key in priority_order:
+            if key.lower() in instruction_lower:
+                return mapping[key]
+        
+        # 其他映射
+        for key, path in mapping.items():
+            if key not in priority_order and key.lower() in instruction_lower:
+                return path
+        
+        # 3. 如果指令中提到具体的文件夹名（如"自定文件"），优先搜索 Desktop
+        # 因为用户自定义文件夹通常在 Desktop 或 Documents
+        if any(kw in instruction for kw in ["文件夹", "目录", "folder", "directory"]):
+            # 检查是否提到具体的文件夹名
+            import re
+            # 匹配中文文件夹名（如"自定文件"、"我的文件夹"）
+            folder_pattern = r'["""]([^"""]+)["""]|到([^到]+)文件夹|到([^到]+)目录'
+            matches = re.findall(folder_pattern, instruction)
+            if matches:
+                # 如果提到具体文件夹名，优先在 Desktop 搜索
+                return "~/Desktop"
+        
+        # 4. 默认返回 Desktop（最常见的操作目录）
+        return "~/Desktop"
     
     def _build_prompt(
         self,
@@ -174,6 +345,13 @@ class DeepSeekPlanner(BasePlanner):
         context: Optional[Dict[str, Any]] = None
     ) -> str:
         """构建规划提示词"""
+        # 获取当前时间（从 context 或使用默认值）
+        current_time = ""
+        if context:
+            current_time = context.get("current_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        else:
+            current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         # 构建上下文信息
         context_info = ""
         if context:
@@ -218,6 +396,18 @@ class DeepSeekPlanner(BasePlanner):
                 if len(created_files) > 1:
                     context_info += f"- 之前操作过的文件: {', '.join(created_files[:5])}\n"
                 context_info += "\n提示：如果用户说\"这个文件\"、\"刚才的文件\"等，请结合对话历史和文件上下文判断用户指的是哪个文件。\n"
+                
+                # *** 关键修复 ***
+                # 显式指示优先级，防止 AI 过度关注历史记录中的旧文件
+                context_info += """
+**重要上下文优先级**：
+1. **最高优先级**：[用户附加的文件/文件夹] (attached_path)
+   - 如果用户说"这个文件"、"这个文件夹"、"整理它"、"处理它"，且 attached_path 存在，**必须**优先操作 attached_path，忽略对话历史中提到的其他文件。
+2. **次高优先级**：[最近操作的文件] (last_created_file)
+   - 只有当 attached_path 为空时，才考虑 last_created_file。
+3. **最低优先级**：对话历史
+   - 只有前两者都为空时，才从历史中推断。
+"""
         
         # 按需精简 prompt
         needs_browser = any(kw in instruction for kw in [
@@ -307,6 +497,14 @@ class DeepSeekPlanner(BasePlanner):
 - **理解用户的真实意图**：仔细分析用户的自然语言指令，理解用户想做什么
 - **拆分多个操作**：如果用户指令包含多个操作（如"打开应用然后输入文本"），必须拆分为多个步骤
 - **每个步骤只做一件事**：一个步骤只执行一个操作
+- **意图与内容分离**：严禁将控制逻辑（如“重复N次”、“每隔五分钟”）误认为是内容（如邮件正文、文本）。
+
+**重复执行规则**（极其重要）：
+- 如果用户要求“重复 N 次”、“执行十遍”、“做三次”：
+  - **如果 N <= 5**：直接在 JSON 数组中生成 N 个完全相同的任务步骤。
+  - **如果 N > 5**：必须生成一个 `execute_python_script` 步骤，在代码中使用 `for i in range(N):` 循环来调用相应的逻辑。
+- 示例：“发邮件给 boss@qq.com，内容是‘开会’，发送三遍”
+  → 应生成 3 个独立的 `send_email` 步骤，而不是把“发送三遍”写进 body。
 
 **最重要的规则（必须遵守！）**：
 - **调整亮度** → 必须用 `set_brightness` 工具，绝对不要用脚本！
@@ -326,6 +524,13 @@ class DeepSeekPlanner(BasePlanner):
 4. **脚本执行**：生成并执行Python脚本完成复杂任务
 
 **可用工具及必需参数**（只能使用以下工具，不能自创工具名！）：
+
+**⚠️ 重要：工具类型命名规则**
+- **严禁使用**以下非标准类型：`app_control`, `file_manager`, `FileManager`, `file_operation`, `shell`
+- **文件操作必须使用标准类型**：`file_delete`, `file_read`, `file_write`, `file_create`, `file_rename`, `file_move`, `file_copy`
+- **应用操作必须使用标准类型**：`open_app`, `close_app`（不要用 `app_control`）
+
+**文件操作工具**：
 - file_read: 读取文件 → params: {{"file_path": "文件路径"}}
 - file_write: 写入文件 → params: {{"file_path": "文件路径", "content": "内容"}}
 - file_create: 创建文件 → params: {{"file_path": "文件路径", "content": "内容"}}
@@ -336,6 +541,7 @@ class DeepSeekPlanner(BasePlanner):
 - screenshot_desktop: 截图桌面 → params: {{"save_path": "保存路径（可选）"}}
 - open_file: 打开文件 → params: {{"file_path": "文件路径"}}
 - open_folder: 打开文件夹 → params: {{"folder_path": "文件夹路径"}}
+- list_files: 列出文件 (Grounding) → params: {{"path": "目录路径(如 ~/Desktop)"}}
 - open_app: 打开应用 → params: {{"app_name": "应用名称"}}
 - close_app: 关闭应用 → params: {{"app_name": "应用名称"}}
 - execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
@@ -349,6 +555,29 @@ class DeepSeekPlanner(BasePlanner):
 - clipboard_write: 写入剪贴板 → params: {{"content": "内容"}}
 - keyboard_type: 键盘输入 → params: {{"text": "要输入的文本"}}
 - keyboard_shortcut: 按键/快捷键（用于回车/Tab/Esc/方向键/⌘C 等）→ params: {{"keys": "command+c"}}，可选 {{"repeat": 2}}（如按两次回车）
+- search_emails: 搜索邮件 → params: {{"query": "搜索词", "folder": "文件夹(可选)", "limit": 10(可选)}}
+  - **重要**: query 必须包含 IMAP 语法（如 `(FROM "xxx")`, `(SUBJECT "xxx")`, `UNSEEN`）。
+- get_email_details: 获取邮件详情 → params: {{"id": "邮件ID", "folder": "文件夹(可选)"}}
+- download_attachments: 下载邮件附件 → params: {{"id": "邮件ID", "save_dir": "保存目录", "file_type": "后缀名(如pdf, 可选)", "limit": 数量(可选), "folder": "文件夹(可选)"}}
+- manage_emails: 管理邮件 → params: {{"id": "邮件ID", "action": "move/mark_read", "target_folder": "目标文件夹(如果是move)"}}
+- analyze_document: 智能文档分析 (PDF/Docx/Excel) → params: {{"file_path": "路径", "action": "map/read/analyze", "query": "问题", "page_num": 1(可选)}}
+  - **重要**: 优先使用 `map` 获取结构，再根据需求 `read` 特定页或 `analyze` 全文。
+- run_applescript: 运行 AppleScript (macOS 自动化) → params: {{"script": "脚本内容"}}
+- manage_calendar_event: 管理日历 (macOS) → params: {{"action": "create/list", "title": "标题", "start_time": "YYYY-MM-DD HH:MM:SS"}}
+- manage_reminder: 管理提醒事项 (macOS) → params: {{"action": "create/list", "title": "标题"}}
+- visual_assist: 视觉助手 (Phase 39) → params: {{"action": "query/locate/extract_text", "query": "问题(extract_text时可选)", "image_path": "图片路径(可选，不提供则自动截图)", "force_vlm": false}}
+  - **action说明**:
+    - `query`: 问答模式（默认），需要query参数，如"屏幕上那个红色的按钮写什么？"
+    - `locate`: 定位模式，需要query参数，查找元素位置，返回坐标，如"找到提交按钮的位置"
+    - `extract_text`: 提取模式，query参数可选（不提供则提取所有文本），提取截图中的所有文本
+  - **参数要求**:
+    - `query` 和 `locate` 操作**必须**提供 `query` 参数
+    - `extract_text` 操作 `query` 参数**可选**（不提供则提取所有文本）
+  - **成本优化**: 系统会自动使用OCR优先策略（成本0），仅在需要语义理解时调用VLM
+  - **坐标系注意**: 返回的坐标已处理Retina缩放，可直接用于mouse_click
+  - **示例**: 
+    - {{"type": "visual_assist", "params": {{"action": "locate", "query": "找到提交按钮的位置"}}}}
+    - {{"type": "visual_assist", "params": {{"action": "extract_text"}}}}
 
 **键盘规则（重要！）**：
 - **输入文字**用 `keyboard_type`（支持中文、英文、数字、符号）
@@ -388,11 +617,14 @@ class DeepSeekPlanner(BasePlanner):
 **关键规则**：
 1. **Word文档(.docx)操作必须用 execute_python_script**，没有 replace_text_in_docx 工具！
 2. **批量文件操作必须用 execute_python_script**
-3. **不能自创工具名**，只能用上面列出的
-4. 如果任务无法用上面工具完成，就用 execute_python_script
-5. **音量控制必须用 set_volume 工具**，不要用脚本！
-6. **亮度控制必须用 set_brightness 工具**，不要用脚本！
-7. **系统通知必须用 send_notification 工具**，不要用脚本！
+3. **不能自创工具名**，只能用上面列出的标准类型
+4. **严禁使用非标准类型**：`app_control`, `file_manager`, `FileManager`, `file_operation`, `shell` 等都是无效类型
+5. **文件删除必须用 `file_delete`**，不要用 `app_control` 或 `file_manager`
+6. **应用关闭必须用 `close_app`**，不要用 `app_control`
+7. 如果任务无法用上面工具完成，就用 execute_python_script
+8. **音量控制必须用 set_volume 工具**，不要用脚本！
+9. **亮度控制必须用 set_brightness 工具**，不要用脚本！
+10. **系统通知必须用 send_notification 工具**，不要用脚本！
 
 **Python脚本执行**（复杂任务或工具无法满足时使用）：
 - script: Python代码，**必须使用 base64 编码**（避免JSON转义问题）
@@ -434,7 +666,12 @@ class DeepSeekPlanner(BasePlanner):
     - **示例2**：如果用户说"总结.txt"，必须使用 `"总结.txt"`，**绝对不要**改成 `"连排.txt"`、`"输克.txt"` 或其他任何名称。
     - **检查方法**：生成脚本后，检查脚本中的文件名是否与用户指令中的文件名完全一致，如果不一致，必须修正。
   * **Python语法（极其重要！！！）**：
-    - **绝对禁止 f-string**：不要用 f"xxx" 格式！
+    - **列表/字典定义必须闭合**：检查所有 list `[]` 和 dict `{{}}` 是否正确闭合。
+    - **中文列表极其容易出错**：定义包含中文的列表时，必须逐个检查引号。
+       正确: `numbers = ["一", "二", "三"]`
+       错误: `numbers = ["一", "二", "三]` (缺少闭合引号)
+    - **绝对禁止 f-string**：不要用 f"xxx" 格式！因为嵌套引号极易出错。
+    - **禁止**在 f-string 中使用复杂嵌套引号。例如 `f"Status: {{json.dumps(...)}}"` 极易出错。请分开写：`status_json = json.dumps(...); print(f"Status: {{status_json}}")`
     - **字符串拼接必须完整**：每个 + 两边都要有完整的字符串
       正确: "成功删除 " + str(count) + " 个文件"
       错误: "成功删除 " + str(count) " 个文件"  (缺少 +)
@@ -476,12 +713,96 @@ class DeepSeekPlanner(BasePlanner):
 
 **重要规则**：
 - **桌面截图任务**：如果用户说"截图桌面"、"桌面截图"、"保存到桌面"等，**必须使用 screenshot_desktop 工具**，并且**如果用户要求保存到桌面，必须传递 save_path 参数**：
-  * 如果用户说"保存到桌面"或"保存桌面"：必须传递 `"save_path": "~/Desktop/screenshot.png"` 或 `"save_path": "~/Desktop"`
+  * 如果用户说"保存到桌面"或"保存桌面"：传递 `"save_path": "~/Desktop/screenshot.png"`（必须包含文件名和 .png 后缀，不要只传目录）
   * 如果用户只说"截图桌面"但没有说保存位置：可以省略 save_path（使用默认位置）
 - **只执行用户明确要求的操作**：如果用户说"截图桌面"，就只截图，不要删除文件、移动文件或其他操作
 - **准确理解用户意图**：如果用户说"保存到桌面"，必须传递 save_path 参数
 
-**上下文理解**：
+**浏览器登录&下载工作流**：
+- **下载需要登录的网站**：如果检测到下载需要登录，必须按以下顺序：
+  1. `browser_navigate`（导航到网站）
+  2. `request_login` 或 `request_qr_login`（请求登录）
+  3. 等待2-3秒（`browser_wait`）
+  4. `download_file`（下载文件）
+  示例："下载GitHub私有仓库" →
+  ```json
+  [
+    {{"type": "browser_navigate", "params": {{"url": "github.com/user/repo"}}}},
+    {{"type": "request_login", "params": {{"site_name": "GitHub"}}}},
+    {{"type": "browser_wait", "params": {{"timeout": 3000}}}},
+    {{"type": "download_file", "params": {{"text": "Download ZIP"}}}}
+  ]
+  ```
+- **二维码登录网站**（微信、QQ等）：
+  ```json
+  [
+    {{"type": "browser_navigate", "params": {{"url": "网站URL"}}}},
+    {{"type": "request_qr_login", "params": {{"site_name": "网站名"}}}}
+  ]
+  ```
+- **验证码处理**：如果检测到验证码：
+  ```json
+  {{"type": "request_captcha", "params": {{
+    "captcha_image_selector": "img.captcha",
+    "captcha_input_selector": "input[name='captcha']",
+    "site_name": "网站名"
+  }}}}
+  ```
+
+**电子邮件管道协议**（强制遵守）：
+- **严格搜索优先**：必须先使用 `search_emails` 获取唯一 ID（UID），然后才能通过该 ID 执行下载（`download_attachments`）或读取（`get_email_details`）操作。
+- **零脚本策略**：严禁生成任何 Python 脚本（特别是 Base64 脚本）进行 IMAP/SMTP 通信。所有邮件检索和附件下载必须且仅能使用内置工具。
+- **参数映射**：将搜索结果中的 `id` 直接映射到下载工具的 `id` 参数，确保 ID 链条清晰。
+
+**智能文档分析协议**（强制遵守）：
+- **分阶段读取 (Read-on-Demand)**：禁止直接将大型文档全部读入。必须先使用 `analyze_document(action="map")` 获取文档页数和摘要，然后再使用 `action="read"` 读取特定页或 `action="analyze"` 进行针对性提问。
+- **结构化优先**：对于 Excel 文件，AI 会自动将其转换为 Markdown Table 以便理解，不要尝试自己解析。
+- **本地文件路径**：利用 `EmailExecutor` 下载后的路径闭环（通常在 `~/Desktop/DeskJarvis_Downloads` 目录下）。
+- **会话级记忆**：利用系统内置的缓存机制，在同一对话周期内对同一文件的后续提问不需要重复执行 `map` 步骤。
+
+**落地纠偏协议 (Grounding Protocol G+)**：
+- **禁止盲目猜测**：在处理本地文件（尤其是涉及非 Downloads 目录的文件夹，或使用“最后一份”、“桌面上的”等模糊语词时），**必须第一时间**调用 `list_files` 确认目录内容。
+- **视野优先**：严禁在未确认路径及文件准确名称的情况下编写 Python 搜索脚本或调用分析工具。
+- **理智终止**：如果 `list_files` 探测结果显示目标内容不存在，**必须立即向用户汇报并请求提供准确路径**，严禁通过反复修改代码尝试“撞运气”。
+
+**日历与任务自动化协议 (Phase 38+)**：
+- **时间锚点**：系统已在上下文 `current_time` 提供当前精确时间。在安排任何日程前，必须先比对当前时间，禁止排错日期。
+- **冲突预警**：创建日历事件前，应先执行 `manage_calendar_event(action="list")`。若发现已有重合日程，必须如实反馈给用户。
+
+**邮件深度处理工作流**（极其重要）：
+- **优先原则**：绝对优先使用内置工具。**禁止**为“搜索/读取/下载附件/发送”编写任何 Python 脚本或调用 `imaplib`！
+- **搜索与下载附件工作流**：
+  1. `search_emails` (获取ID)
+  2. `download_attachments` (如果用户要求下载附件)。示例：“下载财务发来的最近2个PDF” → 
+     - 步骤1: `search_emails(query='(FROM "Finance")')`
+     - 步骤2: `download_attachments(id="从步骤1获取的ID", file_type="pdf", limit=2, save_dir="~/Desktop/Downloads")`
+  3. `open_folder` (如果是下载到桌面的文件夹)
+- **参数标准化**：
+  - 搜索必须用 `query`。
+  - 时间范围（如果有）必须转换为 IMAP 语法（如 `(SINCE "01-Feb-2026")`）放入 `query`。
+- **发送桌面文件/图片**：直接使用 `send_email` 工具。AI 绝对禁止为此生成 Python 脚本！
+  示例："发邮件给 boss@example.com 说附件是刚才的截图" → 直接调用 `send_email`。
+- **全链路联动逻辑**：
+  - 示例："把李总发给我的周报摘要并发回给他"：
+    1. `search_emails(query='(FROM "李总")')`
+    2. `get_email_details(id='xxx')`
+    3. `text_process(action='summarize', text='...')`
+    4. `send_email(recipient='李总邮箱', body='摘要：...')`
+- **归档/标记工作流**：
+  - 示例："把包含发票的邮件移到财务文件夹"：
+    1. `search_emails(query='(SUBJECT "发票")')`
+    2. `manage_emails(id='xxx', action='move', target_folder='财务')`
+- **压缩文件规则**：
+  - 必须包含 `files` (列表) 和 `output` (路径，建议使用 /tmp/ 目录)
+  - 示例：`{{"type": "compress_files", "params": {{"files": ["~/Desktop/docs"], "output": "/tmp/docs.zip"}}}}`
+
+**全链路文档理解流程**：
+- **示例**：“分析刚才下载的那份合同里的风险点”：
+  1. `analyze_document(file_path="~/Desktop/DeskJarvis_Downloads/合同xxxx.pdf", action="map")`
+  2. `analyze_document(file_path="...", action="analyze", query="请列出这份合同中关于违约金和法律纠纷的风险点。")`
+
+**上下文信息**：
+- 当前系统时间: {current_time}
 {context_info}
 
 **用户指令**：{instruction}
@@ -505,19 +826,6 @@ class DeepSeekPlanner(BasePlanner):
 - JSON格式必须严格正确，可以被Python的json.loads()解析
 - **理解自然语言**：仔细分析用户指令，正确拆分多个操作
 
-示例（Word文档替换 - 正确的 runs 遍历方式）：
-[
-  {{
-    "type": "execute_python_script",
-    "action": "替换Word文档中的文字",
-    "params": {{
-      "script": "aW1wb3J0IGpzb24KaW1wb3J0IG9zCmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aAoKdHJ5OgogICAgZnJvbSBkb2N4IGltcG9ydCBEb2N1bWVudApleGNlcHQgSW1wb3J0RXJyb3I6CiAgICBwcmludChqc29uLmR1bXBzKHsic3VjY2VzcyI6IEZhbHNlLCAibWVzc2FnZSI6ICLpnIDopoHlronoo4UgcHl0aG9uLWRvY3g6IHBpcCBpbnN0YWxsIHB5dGhvbi1kb2N4In0pKQogICAgZXhpdCgwKQoKIyDmkJzntKLmlofku7YKZGVza3RvcCA9IFBhdGguaG9tZSgpIC8gIkRlc2t0b3AiCmtleXdvcmQgPSAi5by65Yi25omn6KGMIgpvbGRfdGV4dCA9ICLlvKDmlofnpoQiCm5ld190ZXh0ID0gIuW8oOaXreaUvyIKCm1hdGNoZXMgPSBbZiBmb3IgZiBpbiBkZXNrdG9wLml0ZXJkaXIoKSBpZiBmLmlzX2ZpbGUoKSBhbmQga2V5d29yZCBpbiBmLm5hbWUgYW5kIGYuc3VmZml4ID09ICIuZG9jeCJdCgppZiBub3QgbWF0Y2hlczoKICAgIHByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogRmFsc2UsICJtZXNzYWdlIjogIuacquaJvuWIsOWMheWQqyciICsga2V5d29yZCArICIn55qEV29yZOaWh+ahoyJ9KSkKICAgIGV4aXQoMCkKCmZpbGVfcGF0aCA9IG1hdGNoZXNbMF0KZG9jID0gRG9jdW1lbnQoZmlsZV9wYXRoKQpjb3VudCA9IDAKCiMg5q2j56Gu55qE5pu/5o2i5pa55rOV77ya6YGN5Y6GIHJ1bnMKZm9yIHBhcmEgaW4gZG9jLnBhcmFncmFwaHM6CiAgICBpZiBvbGRfdGV4dCBpbiBwYXJhLnRleHQ6CiAgICAgICAgZm9yIHJ1biBpbiBwYXJhLnJ1bnM6CiAgICAgICAgICAgIGlmIG9sZF90ZXh0IGluIHJ1bi50ZXh0OgogICAgICAgICAgICAgICAgcnVuLnRleHQgPSBydW4udGV4dC5yZXBsYWNlKG9sZF90ZXh0LCBuZXdfdGV4dCkKICAgICAgICAgICAgICAgIGNvdW50ICs9IDEKCiMg5Lmf5qOA5p+l6KGo5qC8CmZvciB0YWJsZSBpbiBkb2MudGFibGVzOgogICAgZm9yIHJvdyBpbiB0YWJsZS5yb3dzOgogICAgICAgIGZvciBjZWxsIGluIHJvdy5jZWxsczoKICAgICAgICAgICAgaWYgb2xkX3RleHQgaW4gY2VsbC50ZXh0OgogICAgICAgICAgICAgICAgZm9yIHBhcmEgaW4gY2VsbC5wYXJhZ3JhcGhzOgogICAgICAgICAgICAgICAgICAgIGZvciBydW4gaW4gcGFyYS5ydW5zOgogICAgICAgICAgICAgICAgICAgICAgICBpZiBvbGRfdGV4dCBpbiBydW4udGV4dDoKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHJ1bi50ZXh0ID0gcnVuLnRleHQucmVwbGFjZShvbGRfdGV4dCwgbmV3X3RleHQpCiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb3VudCArPSAxCgpkb2Muc2F2ZShmaWxlX3BhdGgpCnByaW50KGpzb24uZHVtcHMoeyJzdWNjZXNzIjogVHJ1ZSwgIm1lc3NhZ2UiOiAi5pu/5o2i5a6M5oiQ77yM5YWx5pu/5o2iICIgKyBzdHIoY291bnQpICsgIiDlpIQifSkpCg==",
-      "reason": "Word文档替换需要使用python-docx库，必须遍历runs",
-      "safety": "只操作桌面文件，使用try-except"
-    }},
-    "description": "搜索并替换Word文档中的文字（遍历runs方式）"
-  }}
-]
 
 **关键**：script 字段必须是 base64 编码的完整 Python 代码！"""
         

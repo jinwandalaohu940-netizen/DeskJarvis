@@ -168,10 +168,96 @@ class UserInputManager:
         
         return self._send_request_and_wait(request)
     
+    def request_qr_login(
+        self,
+        qr_image: str,  # base64 编码的二维码图片
+        site_name: str = "网站",
+        message: Optional[str] = None,
+    ) -> bool:
+        """
+        请求二维码登录
+        
+        Args:
+            qr_image: base64 编码的二维码图片
+            site_name: 网站名称
+            message: 额外提示信息
+            
+        Returns:
+            True 如果用户确认已扫码，False 如果取消/超时
+        """
+        request = UserInputRequest(
+            request_type="qr_login",
+            title=f"扫码登录 - {site_name}",
+            message=message or "请使用手机扫描二维码登录",
+            captcha_image=qr_image,  # 复用此字段传递 QR 图片
+            fields=[],  # QR 登录不需要输入字段
+        )
+        
+        result = self._send_request_and_wait(request, timeout=600)  # QR 登录允许 10 分钟
+        # 对于 QR 登录，只要收到响应（未取消）就视为成功
+        return result is not None
+    
+    def request_email_config(
+        self,
+        default_smtp: str = "smtp.gmail.com",
+        default_port: int = 587,
+        message: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        请求邮件配置信息
+        
+        Args:
+            default_smtp: 默认 SMTP 服务器
+            default_port: 默认端口
+            message: 额外提示信息
+            
+        Returns:
+            {"smtp_server": "...", "smtp_port": "...", "sender_email": "...", "password": "..."} 或 None
+        """
+        request = UserInputRequest(
+            request_type="email_config",
+            title="配置邮件服务",
+            message=message or "请填写您的邮件服务配置，以便 DeskJarvis 可以为您发送邮件。建议使用“应用专用密码”。",
+            fields=[
+                {
+                    "name": "sender_email",
+                    "label": "发件人邮箱",
+                    "type": "text",
+                    "placeholder": "例如: yourname@gmail.com",
+                    "required": True,
+                },
+                {
+                    "name": "password",
+                    "label": "密码 / 应用专用密码",
+                    "type": "password",
+                    "placeholder": "请输入密码或 App Password",
+                    "required": True,
+                },
+                {
+                    "name": "smtp_server",
+                    "label": "SMTP 服务器",
+                    "type": "text",
+                    "value": default_smtp,
+                    "placeholder": "例如: smtp.gmail.com",
+                    "required": True,
+                },
+                {
+                    "name": "smtp_port",
+                    "label": "SMTP 端口",
+                    "type": "number",
+                    "value": str(default_port),
+                    "placeholder": "例如: 587 或 465",
+                    "required": True,
+                },
+            ],
+        )
+        
+        return self._send_request_and_wait(request)
+    
     def _send_request_and_wait(
         self,
         request: UserInputRequest,
-        timeout: int = 300,  # 5分钟超时
+        timeout: int = 600,  # 10分钟超时（从300增加）
     ) -> Optional[Dict[str, str]]:
         """
         发送请求并等待用户响应
@@ -191,13 +277,31 @@ class UserInputManager:
         if self.emit:
             self.emit("request_input", request.to_dict())
             logger.info(f"发送用户输入请求: {request.id}, 类型: {request.type}")
+            logger.info(f"响应文件路径: {self.response_file}")
         else:
             logger.error("没有设置 emit 回调，无法发送用户输入请求")
             return None
         
-        # 等待响应
+        # 等待响应，增加心跳机制
         start_time = time.time()
+        last_heartbeat = start_time
+        heartbeat_interval = 5  # 每5秒发送一次心跳
+        
         while time.time() - start_time < timeout:
+            # 发送心跳事件（让前端知道后端还在等待）
+            current_time = time.time()
+            if current_time - last_heartbeat >= heartbeat_interval:
+                if self.emit:
+                    elapsed = int(current_time - start_time)
+                    remaining = timeout - elapsed
+                    self.emit("waiting_for_input", {
+                        "request_id": request.id,
+                        "elapsed": elapsed,
+                        "remaining": remaining,
+                    })
+                    logger.debug(f"等待用户输入中... 已等待 {elapsed}秒, 剩余 {remaining}秒")
+                last_heartbeat = current_time
+            
             if self.response_file.exists():
                 try:
                     with open(self.response_file, "r", encoding="utf-8") as f:
@@ -214,16 +318,16 @@ class UserInputManager:
                             return None
                         
                         values = response.get("values", {})
-                        logger.info(f"收到用户输入: {request.id}")
+                        logger.info(f"收到用户输入: {request.id}, 值: {list(values.keys())}")
                         return values
                         
                 except (json.JSONDecodeError, IOError) as e:
                     logger.warning(f"读取响应文件失败: {e}")
             
-            # 短暂等待
-            time.sleep(0.2)
+            # 增加轮询间隔（从0.2秒增加到0.5秒，减少CPU占用）
+            time.sleep(0.5)
         
-        logger.warning(f"用户输入请求超时: {request.id}")
+        logger.warning(f"用户输入请求超时: {request.id}, 超时时间: {timeout}秒")
         return None
 
 

@@ -807,19 +807,23 @@ _dj_save_current_figure()
             # 尝试解析 JSON 输出
             try:
                 json_output = json.loads(stdout)
-                return CodeExecutionResult(
-                    success=json_output.get("success", True),
-                    message=json_output.get("message", "执行完成"),
-                    output=stdout,
-                    data=json_output.get("data")
-                )
+                if isinstance(json_output, dict):
+                    return CodeExecutionResult(
+                        success=json_output.get("success", True),
+                        message=json_output.get("message", "执行完成"),
+                        output=stdout,
+                        data=json_output.get("data")
+                    )
+                # 如果不是字典（例如 print(1+1) -> 2），视为普通输出
             except json.JSONDecodeError:
-                # 不是 JSON，返回原始输出
-                return CodeExecutionResult(
-                    success=True,
-                    message="执行完成",
-                    output=stdout
-                )
+                pass
+                
+            # 返回原始输出
+            return CodeExecutionResult(
+                success=True,
+                message="执行完成",
+                output=stdout
+            )
                 
         except subprocess.TimeoutExpired:
             return CodeExecutionResult(

@@ -179,12 +179,13 @@ class FileManager:
             
             raise FileManagerError(f"移动文件失败: {e}") from e
     
-    def execute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_step(self, step: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行文件操作步骤
         
         Args:
             step: 任务步骤，包含type、action、params等
+            context: 上下文信息（可选，用于传递文件缓存等）
         
         Returns:
             执行结果
@@ -1104,6 +1105,10 @@ class FileManager:
             raise FileManagerError(f"路径不是文件: {file_path}")
         
         # ========== 处理目标路径 ==========
+        # 兼容 destination 参数（Planner 可能使用这个名称）
+        if not target_path_str:
+            target_path_str = params.get("destination")
+        
         if target_path_str:
             # 处理 ~ 符号
             if target_path_str.startswith("~/"):
@@ -1113,8 +1118,24 @@ class FileManager:
             
             target_path = Path(target_path_str)
             
+            # 智能搜索：如果只是文件夹名（不包含路径分隔符），尝试搜索文件夹
+            if "/" not in target_path_str and "\\" not in target_path_str and not target_path_str.startswith("~"):
+                logger.info(f"检测到目标文件夹名格式，开始智能搜索: {target_path_str}")
+                found_folder = self._find_folder(target_path_str)
+                if found_folder:
+                    target_path = found_folder
+                    logger.info(f"找到目标文件夹: {target_path}")
+                    # 目标路径是文件夹，使用源文件名并添加后缀
+                    stem = file_path.stem
+                    suffix = file_path.suffix
+                    target_path = target_path / f"{stem}{copy_suffix}{suffix}"
+                else:
+                    raise FileManagerError(
+                        f"未找到目标文件夹: {target_path_str}。"
+                        f"请提供完整路径，如 '~/Desktop/{target_path_str}' 或 '/Users/username/Desktop/{target_path_str}'"
+                    )
             # 如果是相对路径，相对于用户主目录
-            if not target_path.is_absolute():
+            elif not target_path.is_absolute():
                 target_path = Path.home() / target_path
             
             target_path = target_path.resolve()

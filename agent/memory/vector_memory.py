@@ -57,13 +57,13 @@ class VectorMemory:
         self.db_path.mkdir(parents=True, exist_ok=True)
         
         # ========== 异步加载嵌入模型（方案3：不阻塞主线程） ==========
-        self._model_name = model_name
-        load_thread = threading.Thread(
-            target=self._load_model_background,
-            name="VectorMemory-ModelLoader",
-            daemon=True,
-        )
-        load_thread.start()
+        # 使用 SharedEmbeddingModel (单例) 避免重复加载
+        from agent.core.embedding_model import SharedEmbeddingModel
+        self._shared_model = SharedEmbeddingModel.get_instance(model_name)
+        self._shared_model.start_loading()
+        
+        # 兼容旧代码：保留 self.model 属性（虽然其实用不到 self.model.encode 了，都走 wrapper）
+        self.model = None
         
         # 初始化 Chroma（不依赖嵌入模型，可并行）
         self.client = self._init_chroma_client()
@@ -262,41 +262,74 @@ class VectorMemory:
             name="summaries",
             metadata={"description": "压缩后的记忆摘要"}
         )
+        
+        # 执行数据整理/迁移（将字符串时间戳改为数值）
+        self._migrate_timestamps()
+    
+    def _migrate_timestamps(self):
+        """
+        迁移逻辑：将旧的 ISO 字符串时间戳转换为 Unix 浮点数。
+        ChromaDB 的 $lt 等比较操作符要求操作数必须为数值类型。
+        """
+        if not self.enabled:
+            return
+            
+        collections = [self.conversations, self.instructions, self.summaries]
+        for collection in collections:
+            try:
+                # 获取所有包含字符串时间戳的记录
+                # 注意：Chroma 不支持直接过滤属性类型，所以我们获取全部元数据进行检查
+                results = collection.get(include=["metadatas"])
+                if not results["ids"]:
+                    continue
+                
+                updated_ids = []
+                updated_metadatas = []
+                
+                for i, doc_id in enumerate(results["ids"]):
+                    meta = results["metadatas"][i]
+                    ts = meta.get("timestamp")
+                    
+                    if isinstance(ts, str):
+                        try:
+                            # 尝试解析 ISO 字符串
+                            dt = datetime.fromisoformat(ts)
+                            # 转换为 Unix 时间戳
+                            meta["timestamp"] = dt.timestamp()
+                            updated_ids.append(doc_id)
+                            updated_metadatas.append(meta)
+                        except (ValueError, TypeError):
+                            # 如果不是合法的 ISO 格式，设为当前时间避免报错
+                            meta["timestamp"] = time.time()
+                            updated_ids.append(doc_id)
+                            updated_metadatas.append(meta)
+                
+                if updated_ids:
+                    collection.update(
+                        ids=updated_ids,
+                        metadatas=updated_metadatas
+                    )
+                    logger.info(f"已迁移 {collection.name} 集合中的 {len(updated_ids)} 条时间戳数据")
+            except Exception as e:
+                logger.warning(f"迁移集合 {collection.name} 时间戳失败: {e}")
     
     def _generate_id(self, text: str) -> str:
         """生成唯一ID"""
         return hashlib.md5(f"{text}{time.time()}".encode()).hexdigest()[:16]
     
-    def _load_model_background(self) -> None:
-        """后台线程：加载 sentence-transformers 嵌入模型"""
-        try:
-            logger.info("[后台] 开始加载嵌入模型: " + str(self._model_name))
-            start = time.time()
-            self.model = self._SentenceTransformer(self._model_name)  # type: ignore[misc]
-            elapsed = time.time() - start
-            logger.info("[后台] 嵌入模型加载完成，耗时 %.1fs" % elapsed)
-        except Exception as e:
-            self._model_load_error = e
-            logger.error("[后台] 嵌入模型加载失败，向量搜索将不可用: " + str(e))
-        finally:
-            self._model_ready.set()
-
+    
+    # _load_model_background 已移除，由 SharedEmbeddingModel 托管
+    
     def _embed(self, text: str) -> List[float]:
         """
         生成文本嵌入。
-        
-        如果模型尚未加载完成，最多等待 60 秒。
-        如果加载失败或超时，返回空列表（调用方应据此跳过向量操作）。
+        委托给 SharedEmbeddingModel 处理
         """
         if not self.enabled:
             return []
-        # 等待模型就绪（非阻塞主流程的异步加载）
-        if not self._model_ready.wait(timeout=60):
-            logger.warning("嵌入模型加载超时(60s)，跳过本次向量操作")
-            return []
-        if self._model_load_error is not None or self.model is None:
-            return []
-        return self.model.encode(text).tolist()
+            
+        return self._shared_model.encode(text)
+
     
     # ========== 对话记忆 ==========
     
@@ -337,7 +370,7 @@ class VectorMemory:
             "session_id": session_id or "",
             "emotion": emotion or "",
             "success": str(success),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": time.time(),
             **(metadata or {})
         }
         
@@ -447,7 +480,7 @@ class VectorMemory:
             "success": str(success),
             "duration": str(duration),
             "files": json.dumps(files_involved or [], ensure_ascii=False),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": time.time()
         }
         
         self.instructions.add(
@@ -545,11 +578,11 @@ class VectorMemory:
         else:
             cutoff = now - timedelta(days=30)
         
-        cutoff_str = cutoff.isoformat()
+        cutoff_ts = cutoff.timestamp()
         
         # 获取需要压缩的对话
         all_results = self.conversations.get(
-            where={"timestamp": {"$lt": cutoff_str}},
+            where={"timestamp": {"$lt": cutoff_ts}},
             include=["documents", "metadatas"]
         )
         
@@ -606,7 +639,7 @@ class VectorMemory:
                 metadatas=[{
                     "date": date_key,
                     "item_count": str(len(items)),
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": time.time()
                 }]
             )
             

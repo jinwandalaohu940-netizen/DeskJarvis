@@ -13,6 +13,8 @@ from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 from agent.tools.exceptions import BrowserError
 from agent.tools.config import Config
 from agent.user_input import UserInputManager
+from agent.executor.browser_state_manager import BrowserStateManager
+from agent.executor.ocr_helper import OCRHelper
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,12 @@ class BrowserExecutor:
         
         # 用户输入管理器
         self.user_input_manager = UserInputManager(emit_callback=emit_callback)
+        
+        # 浏览器状态管理器（Cookie持久化）
+        self.state_manager = BrowserStateManager()
+        
+        # OCR助手（验证码识别）
+        self.ocr_helper = OCRHelper()
         
         logger.info(f"浏览器执行器已初始化，下载目录: {self.download_path}")
     
@@ -100,12 +108,13 @@ class BrowserExecutor:
         except Exception as e:
             logger.warning(f"停止浏览器时出错: {e}")
     
-    def execute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_step(self, step: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行单个任务步骤
         
         Args:
             step: 任务步骤，包含type、action、params等
+            context: 上下文信息（可选，用于传递浏览器状态等）
         
         Returns:
             执行结果，包含success、message、data等
@@ -141,6 +150,8 @@ class BrowserExecutor:
                 return self._request_login(params)
             elif step_type == "request_captcha":
                 return self._request_captcha(params)
+            elif step_type == "request_qr_login":
+                return self._request_qr_login(params)
             elif step_type == "fill_login":
                 return self._fill_login(params)
             elif step_type == "fill_captcha":
@@ -182,6 +193,17 @@ class BrowserExecutor:
         
         try:
             logger.info(f"导航到: {url}")
+            
+            # 新增：尝试加载保存的 cookies（Cookie 持久化）
+            try:
+                if self.state_manager.has_saved_state(url):
+                    saved_cookies = self.state_manager.load_cookies(url)
+                    if saved_cookies:
+                        self.context.add_cookies(saved_cookies)
+                        logger.info(f"已加载 {len(saved_cookies)} 个保存的 cookies")
+            except Exception as cookie_err:
+                logger.warning(f"加载 cookies 失败: {cookie_err}")
+            
             self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
             # 额外等待一下让页面完全渲染
@@ -854,6 +876,78 @@ class BrowserExecutor:
     
     # ===== 登录和验证码处理 =====
     
+    
+    def _verify_login_success(self, initial_url: str, timeout: int = 15000) -> bool:
+        """
+        智能检测登录是否成功（多策略验证）
+        
+        Args:
+            initial_url: 登录前的URL
+            timeout: 超时时间（毫秒）
+        
+        Returns:
+            True 如果检测到登录成功
+        """
+        logger.info("开始登录成功检测...")
+        start_time = time.time()
+        initial_cookie_count = len(self.context.cookies())
+        
+        while (time.time() - start_time) * 1000 < timeout:
+            try:
+                # 策略1: URL变化（跳转到登录后页面）
+                current_url = self.page.url
+                if current_url != initial_url:
+                    # 检查URL是否离开了登录页面
+                    if "login" not in current_url.lower() and "signin" not in current_url.lower():
+                        logger.info(f"✅ 策略1成功: URL已变化 {initial_url} → {current_url}")
+                        return True
+                
+                # 策略2: 登录表单消失
+                try:
+                    password_fields = self.page.locator("input[type='password']").count()
+                    if password_fields == 0:
+                        logger.info("✅ 策略2成功: 登录表单已消失")
+                        self.page.wait_for_timeout(1000)  # 再等1秒确保稳定
+                        return True
+                except Exception:
+                    pass
+                
+                # 策略3: 用户信息元素出现
+                user_indicators = [
+                    "img[alt*='头像']", "img[alt*='avatar']", "img[alt*='Avatar']",
+                    ".user-info", ".user-profile", ".user-avatar",
+                    "a[href*='logout']", "a[href*='signout']",
+                    "button:has-text('退出')", "button:has-text('登出')",
+                    "a:has-text('退出')", "a:has-text('Logout')",
+                    ".username", ".user-name", "[class*='username']"
+                ]
+                for selector in user_indicators:
+                    try:
+                        if self.page.locator(selector).first.is_visible(timeout=500):
+                            logger.info(f"✅ 策略3成功: 检测到用户元素 {selector}")
+                            return True
+                    except Exception:
+                        pass
+                
+                # 策略4: Cookie数量显著增加（登录通常会增加session cookie）
+                current_cookie_count = len(self.context.cookies())
+                if current_cookie_count > initial_cookie_count + 2:  # 至少增加3个cookie
+                    logger.info(f"✅ 策略4成功: Cookie增加 {initial_cookie_count} → {current_cookie_count}")
+                    self.page.wait_for_timeout(1000)
+                    return True
+                
+            except Exception as e:
+                logger.debug(f"检测异常: {e}")
+                pass
+            
+            # 每秒检查一次
+            self.page.wait_for_timeout(1000)
+        
+        logger.warning(f"⚠️ 登录成功检测超时（{timeout/1000}秒），假设失败")
+        return False
+    
+    # ===== 登录和验证码处理 =====
+    
     def _request_login(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         请求用户输入登录信息（智能检测登录表单）
@@ -992,10 +1086,31 @@ class BrowserExecutor:
             
             logger.info("✅ 登录信息已填写")
             
+            # 记录初始URL用于登录成功检测
+            initial_url = self.page.url
+            
+            # 新增：智能登录成功检测(替换简单3秒等待)
+            if self._verify_login_success(initial_url, timeout=15000):
+                logger.info("✅ 登录成功验证通过")
+                login_verified = True
+            else:
+                logger.warning("⚠️ 未能确认登录成功，可能需要人工检查")
+                login_verified = False
+            
+            # 保存 cookies
+            try:
+                current_url = self.page.url
+                cookies = self.context.cookies()
+                if cookies:
+                    self.state_manager.save_cookies(current_url, cookies)
+                    logger.info(f"已保存 {len(cookies)} 个 cookies 到 {site_name}")
+            except Exception as cookie_err:
+                logger.warning(f"保存 cookies 失败: {cookie_err}")
+            
             return {
-                "success": True,
-                "message": "已填写登录信息",
-                "data": {"site_name": site_name}
+                "success": login_verified,
+                "message": "已填写登录信息" + (" (已验证成功)" if login_verified else " (未确认成功)"),
+                "data": {"site_name": site_name, "verified": login_verified}
             }
             
         except Exception as e:
@@ -1004,6 +1119,175 @@ class BrowserExecutor:
             # 截图帮助调试
             try:
                 screenshot_path = self.download_path / f"login_error_{int(time.time())}.png"
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
+                error_msg += f"，已截图: {screenshot_path}"
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "message": error_msg,
+                "data": None
+            }
+    
+    def _request_qr_login(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        二维码登录（检测QR码 → 截图 → 发送给前端 → 等待扫码）
+        
+        Args:
+            params: 参数字典
+                - site_name: 网站名称（必需）
+                - qr_selector: QR码元素选择器（可选，会自动检测）
+                - success_selector: 登录成功后出现的元素选择器（可选）
+                - timeout: 超时时间（毫秒，默认120000）
+        
+        Returns:
+            执行结果字典
+        """
+        site_name = params.get("site_name", "网站")
+        qr_selector = params.get("qr_selector")
+        success_selector = params.get("success_selector")
+        timeout = params.get("timeout", 120000)  # 默认2分钟
+        
+        try:
+            logger.info(f"开始二维码登录: {site_name}")
+            
+            #步骤1: 检测二维码元素
+            qr_locator = None
+            if qr_selector:
+                try:
+                    qr_locator = self.page.locator(qr_selector).first
+                    if not qr_locator.is_visible(timeout=2000):
+                        qr_locator = None
+                except Exception:
+                    qr_locator = None
+            
+            if not qr_locator:
+                # 自动检测常见的二维码选择器
+                common_qr_selectors = [
+                    "img[src*='qrcode']",
+                    "img[src*='qr']",
+                    ".qrcode img",
+                    ".qr-code img",
+                    "canvas.qrcode",
+                    ".qr-code canvas",
+                    ".login-qrcode img",
+                    "[class*='qrcode'] img",
+                    "[class*='qr-code'] img",
+                    "[id*='qrcode']",
+                    "[id*='qr']",
+                ]
+                for sel in common_qr_selectors:
+                    try:
+                        candidate = self.page.locator(sel).first
+                        if candidate.is_visible(timeout=1000):
+                            qr_locator = candidate
+                            logger.info(f"自动检测到二维码: {sel}")
+                            break
+                    except Exception:
+                        continue
+            
+            if not qr_locator:
+                screenshot_path = self.download_path / f"qr_detect_error_{int(time.time())}.png"
+                self.page.screenshot(path=str(screenshot_path), full_page=True)
+                return {
+                    "success": False,
+                    "message": f"未检测到二维码，已截图: {screenshot_path}",
+                    "data": None
+                }
+            
+            # 步骤2: 截图二维码区域
+            logger.info("截图二维码...")
+            qr_screenshot_path = self.download_path / f"qr_code_{int(time.time())}.png"
+            qr_locator.screenshot(path=str(qr_screenshot_path))
+            
+            # 转换为 base64
+            with open(qr_screenshot_path, "rb") as f:
+                qr_image_data = f.read()
+            qr_base64 = base64.b64encode(qr_image_data).decode("utf-8")
+            
+            logger.info(f"二维码已截图: {qr_screenshot_path}, 大小: {len(qr_base64)} bytes")
+            
+            # 步骤3: 请求用户扫码
+            success = self.user_input_manager.request_qr_login(
+                qr_image=qr_base64,
+                site_name=site_name,
+                message=f"请使用手机扫描二维码登录 {site_name}"
+            )
+            
+            if not success:
+                return {
+                    "success": False,
+                    "message": "用户取消了二维码登录",
+                    "data": None
+                }
+            
+            # 步骤4: 等待登录成功（轮询检测）
+            logger.info("等待用户扫码登录...")
+            start_time = time.time()
+            login_success = False
+            
+            while (time.time() - start_time) * 1000 < timeout:
+                try:
+                    # 检查二维码是否消失（常见的登录成功标志）
+                    if not qr_locator.is_visible(timeout=1000):
+                        logger.info("二维码已消失，可能登录成功")
+                        login_success = True
+                        break
+                    
+                    # 如果提供了成功选择器，检查是否出现
+                    if success_selector:
+                        try:
+                            success_elem = self.page.locator(success_selector).first
+                            if success_elem.is_visible(timeout=1000):
+                                logger.info(f"检测到登录成功元素: {success_selector}")
+                                login_success = True
+                                break
+                        except Exception:
+                            pass
+                    
+                    # 检查URL是否变化（可能跳转到登录后页面）
+                    current_url = self.page.url
+                    if "login" not in current_url.lower():
+                        logger.info(f"URL已变化，可能登录成功: {current_url}")
+                        login_success = True
+                        break
+                    
+                except Exception:
+                    pass
+                
+                self.page.wait_for_timeout(2000)  # 每2秒检查一次
+            
+            if not login_success:
+                return {
+                    "success": False,
+                    "message": f"二维码登录超时（{timeout/1000}秒）",
+                    "data": None
+                }
+            
+            # 步骤5: 保存 cookies
+            try:
+                self.page.wait_for_timeout(3000)  # 等待登录完全完成
+                current_url = self.page.url
+                cookies = self.context.cookies()
+                if cookies:
+                    self.state_manager.save_cookies(current_url, cookies)
+                    logger.info(f"已保存 {len(cookies)} 个 cookies 到 {site_name}")
+            except Exception as cookie_err:
+                logger.warning(f"保存 cookies 失败: {cookie_err}")
+            
+            logger.info("✅ 二维码登录成功")
+            
+            return {
+                "success": True,
+                "message": f"二维码登录成功: {site_name}",
+                "data": {"site_name": site_name}
+            }
+            
+        except Exception as e:
+            error_msg = f"二维码登录失败: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            try:
+                screenshot_path = self.download_path / f"qr_login_error_{int(time.time())}.png"
                 self.page.screenshot(path=str(screenshot_path), full_page=True)
                 error_msg += f"，已截图: {screenshot_path}"
             except Exception:
@@ -1097,6 +1381,29 @@ class BrowserExecutor:
             
             logger.info("验证码图片已截取")
             
+            # 新增：OCR自动识别（优先尝试）
+            auto_recognized_text = None
+            if self.ocr_helper.is_available():
+                logger.info("🤖 尝试OCR自动识别验证码...")
+                auto_recognized_text = self.ocr_helper.recognize_captcha(captcha_data_url)
+                
+                if auto_recognized_text:
+                    logger.info(f"✅ OCR识别成功: {auto_recognized_text}")
+                    # 策略1：直接填写（速度快）
+                    try:
+                        self.page.fill(captcha_input_selector, auto_recognized_text, timeout=10000)
+                        logger.info("✅ OCR自动填写验证码")
+                        return {
+                            "success": True,
+                            "message": f"OCR自动识别并填写: {auto_recognized_text}",
+                            "data": {"captcha": auto_recognized_text, "auto_recognized": True}
+                        }
+                    except Exception as fill_err:
+                        logger.warning(f"OCR填写失败: {fill_err}，回退到用户输入")
+                else:
+                    logger.info("⚠️ OCR识别失败，回退到用户输入")
+            
+            # OCR不可用或识别失败，回退到用户输入
             # 请求用户输入验证码
             captcha_text = self.user_input_manager.request_captcha(
                 captcha_image=captcha_data_url,

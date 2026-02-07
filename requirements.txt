@@ -8,6 +8,11 @@ openai>=1.0.0      # OpenAI/ChatGPT/DeepSeek/Grok
 # 浏览器自动化
 playwright>=1.48.0
 
+# OCR识别
+ddddocr>=1.4.11  # 验证码识别（必需，自动安装）
+pytesseract>=0.3.10  # 通用OCR（可选增强，需要系统安装Tesseract）
+Pillow>=10.0.0  # 图片处理（Tesseract OCR需要，也是其他功能的依赖）
+
 # 工具库
 python-dotenv>=1.0.0
 python-docx>=1.1.0  # Word文档处理

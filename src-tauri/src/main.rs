@@ -38,6 +38,11 @@ struct AppConfig {
     sandbox_path: String,
     auto_confirm: bool,
     log_level: String,
+    // 邮件服务配置 (可选，以兼容旧配置)
+    email_sender: Option<String>,
+    email_password: Option<String>,
+    email_smtp_server: Option<String>,
+    email_smtp_port: Option<i32>,
 }
 
 // ==================== 常驻 Python 服务进程 ====================
@@ -528,6 +533,10 @@ async fn get_config() -> Result<AppConfig, String> {
             sandbox_path: get_default_sandbox_path(),
             auto_confirm: false,
             log_level: "INFO".to_string(),
+            email_sender: None,
+            email_password: None,
+            email_smtp_server: Some("smtp.gmail.com".to_string()),
+            email_smtp_port: Some(587),
         });
     }
 

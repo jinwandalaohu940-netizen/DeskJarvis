@@ -241,3 +241,10 @@ deskjarvis@0.1.0
 tauri
 windows
 titleBarStyle
+
+# Temporary development documents (not for public)
+ANALYSIS_REVIEW.md
+STREAMING_OBSERVATION_PLAN.md
+NEXT_FEATURES_PLAN.md
+TECHNICAL_DEFENSE.md
+PROJECT_REPORT.md

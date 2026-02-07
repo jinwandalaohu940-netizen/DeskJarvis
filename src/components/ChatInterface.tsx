@@ -998,6 +998,40 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
               messageContent += `\n尺寸: ${imgData.width}x${imgData.height}`;
             }
           }
+          // 视觉助手结果（OCR文本提取、视觉理解等）
+          else if (stepType === "visual_assist" && stepResult.data) {
+            const visualData = stepResult.data;
+            
+            // extract_text 操作：显示提取的文本
+            if (visualData.text) {
+              const textLength = visualData.text_length || visualData.text.length;
+              messageContent += `\n\n**提取的文字（${textLength}字符）：**\n`;
+              messageContent += "```\n" + visualData.text + "\n```";
+              
+              if (visualData.method) {
+                messageContent += `\n*方法: ${visualData.method === "ocr" ? "OCR识别" : "视觉理解"}`;
+              }
+              if (visualData.warning) {
+                messageContent += `\n*⚠️ ${visualData.warning}`;
+              }
+            }
+            // query 操作：显示答案
+            else if (visualData.answer) {
+              messageContent += `\n\n**答案：**\n${visualData.answer}`;
+              if (visualData.method) {
+                messageContent += `\n*方法: ${visualData.method === "ocr" ? "OCR识别" : "视觉理解"}`;
+              }
+            }
+            // locate 操作：显示坐标
+            else if (visualData.coordinates) {
+              const coords = visualData.coordinates;
+              messageContent += `\n\n**定位结果：**\n`;
+              messageContent += `- 坐标: (${coords.x}, ${coords.y})`;
+              if (coords.normalized_x && coords.normalized_y) {
+                messageContent += `\n- 归一化坐标: (${coords.normalized_x.toFixed(3)}, ${coords.normalized_y.toFixed(3)})`;
+              }
+            }
+          }
           // 提醒列表
           else if (stepType === "list_reminders" && stepResult.data?.reminders) {
             const reminders = stepResult.data.reminders;

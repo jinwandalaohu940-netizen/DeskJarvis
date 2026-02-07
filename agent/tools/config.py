@@ -81,6 +81,11 @@ class Config:
         except Exception as e:
             raise ConfigError(f"加载配置文件失败: {e}")
     
+    def reload(self) -> None:
+        """从磁盘强制重新加载配置"""
+        logger.info("强制从磁盘重新加载配置...")
+        self.load()
+    
     def save(self) -> None:
         """
         保存配置到文件
@@ -166,3 +171,44 @@ class Config:
     def log_level(self) -> str:
         """获取日志级别"""
         return self.get("log_level", "INFO")
+
+    @property
+    def email_sender(self) -> Optional[str]:
+        """获取发件人邮箱"""
+        return self.get("email_sender")
+
+    @property
+    def email_password(self) -> Optional[str]:
+        """获取发件人密码"""
+        return self.get("email_password")
+
+    @property
+    def email_smtp_server(self) -> str:
+        """获取SMTP服务器"""
+        return self.get("email_smtp_server", "smtp.gmail.com")
+
+    @property
+    def email_smtp_port(self) -> int:
+        """获取SMTP端口"""
+        return int(self.get("email_smtp_port", 587))
+
+    @property
+    def email_imap_server(self) -> str:
+        """获取IMAP服务器"""
+        # 如果未设置，尝试根据SMTP服务器推断
+        imap = self.get("email_imap_server")
+        if not imap:
+            smtp = self.email_smtp_server
+            if "smtp.qq.com" in smtp: return "imap.qq.com"
+            if "smtp.gmail.com" in smtp: return "imap.gmail.com"
+            if "smtp.outlook.com" in smtp: return "outlook.office365.com"
+            # 默认尝试替换前缀
+            if smtp.startswith("smtp."):
+                return smtp.replace("smtp.", "imap.")
+            return "imap.gmail.com"
+        return imap
+
+    @property
+    def email_imap_port(self) -> int:
+        """获取IMAP端口"""
+        return int(self.get("email_imap_port", 993))

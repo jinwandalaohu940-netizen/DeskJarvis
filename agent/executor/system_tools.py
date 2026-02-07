@@ -9,10 +9,16 @@ import logging
 import sys
 import subprocess
 import time
+import platform
+import json
+import base64
+from datetime import datetime, timedelta
 from pathlib import Path
-from agent.tools.exceptions import BrowserError
+from agent.tools.exceptions import BrowserError, FileManagerError
 from agent.tools.config import Config
 from agent.executor.code_interpreter import CodeInterpreter
+from agent.executor.document_processor import DocumentProcessor
+from agent.executor.ocr_helper import OCRHelper
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +47,12 @@ class SystemTools:
         
         # 初始化增强版代码解释器
         self.code_interpreter = CodeInterpreter(self.sandbox_path, emit_callback)
+        
+        # 初始化文档处理器
+        self.doc_processor = DocumentProcessor()
+        
+        # 初始化OCR助手（用于视觉辅助的OCR降级）
+        self.ocr_helper = OCRHelper()
         
         logger.info(f"系统工具已初始化，沙盒目录: {self.sandbox_path}")
     
@@ -120,7 +132,7 @@ class SystemTools:
         logger.warning(f"未找到文件夹: {folder_name}")
         return None
     
-    def execute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_step(self, step: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         执行系统操作步骤
         
@@ -143,6 +155,8 @@ class SystemTools:
                 return self._open_folder(params)
             elif step_type == "open_file":
                 return self._open_file(params)
+            elif step_type == "list_files":
+                return self._list_files(params)
             elif step_type == "open_app":
                 return self._open_app(params)
             elif step_type == "close_app":
@@ -209,18 +223,65 @@ class SystemTools:
                 return self._list_favorites(params)
             elif step_type == "remove_favorite":
                 return self._remove_favorite(params)
-            # ========== 文本AI处理 ==========
+            # ========== 文本AI处理与进阶分析 ==========
             elif step_type == "text_process":
                 return self._text_process(params)
+            elif step_type == "analyze_document":
+                return self._analyze_document(params)
+            elif step_type == "run_applescript":
+                return self._run_applescript(params)
+            elif step_type == "manage_calendar_event":
+                return self._manage_calendar_event(params)
+            elif step_type == "manage_reminder":
+                return self._manage_reminder(params)
+            # ========== 视觉交互助手 (Phase 39) ==========
+            elif step_type == "visual_assist":
+                return self._visual_assist(params, context)
             else:
-                raise BrowserError(f"未知的系统操作类型: {step_type}")
+                # 如果是不支持的操作，返回明确的错误信息
+                # 列出 SystemTools 支持的所有操作类型，避免 AI 误解
+                supported_types = [
+                    "screenshot_desktop", "open_folder", "open_file", "list_files",
+                    "open_app", "close_app", "execute_python_script",
+                    "set_volume", "set_brightness", "send_notification",
+                    "clipboard_read", "clipboard_write", "keyboard_type", "keyboard_shortcut",
+                    "mouse_click", "mouse_move", "window_minimize", "window_maximize", "window_close",
+                    "speak", "get_system_info", "image_process",
+                    "set_reminder", "list_reminders", "cancel_reminder",
+                    "create_workflow", "list_workflows", "delete_workflow",
+                    "get_task_history", "search_history", "add_favorite", "list_favorites", "remove_favorite",
+                    "text_process", "analyze_document", "run_applescript",
+                    "manage_calendar_event", "manage_reminder",
+                    "visual_assist"  # Phase 39: 视觉交互助手
+                ]
+                
+                # 检测是否是文件操作相关的错误类型
+                file_related_types = ["file_manager", "FileManager", "file_operation", "app_control"]
+                if step_type in file_related_types:
+                    return {
+                        "success": False,
+                        "message": f"错误：'{step_type}' 不是有效的操作类型。文件操作应使用标准类型：file_delete, file_read, file_write, file_create, file_rename, file_move, file_copy。当前操作类型 '{step_type}' 无效。",
+                        "data": None,
+                        "suggested_type": "file_delete" if "delete" in str(step.get("action", "")).lower() else "file_read"
+                    }
+                
+                return {
+                    "success": False,
+                    "message": f"SystemTools 不支持的操作类型: '{step_type}'。支持的类型: {', '.join(supported_types[:10])}...",
+                    "data": None
+                }
                 
         except Exception as e:
             logger.error(f"执行系统操作失败: {e}", exc_info=True)
             return {
                 "success": False,
                 "message": f"操作失败: {e}",
-                "data": None
+                "data": {
+                    "error_type": "execution_exception",
+                    "exception": str(e),
+                    "step_type": step_type,
+                    "suggestion": "请检查操作参数和系统状态"
+                }
             }
 
     def _resolve_user_path(self, path_str: str, default_base: Optional[Path] = None) -> Path:
@@ -478,6 +539,25 @@ class SystemTools:
             save_path = screenshots_dir / f"desktop_{int(time.time())}.png"
         
         # 确保目录存在
+        if save_path.suffix == "":
+            try:
+                # 尝试判断是否为已有目录
+                if save_path.exists() and save_path.is_dir():
+                    # 是目录，追加默认文件名
+                    import time
+                    save_path = save_path / f"screenshot_{int(time.time())}.png"
+                    logger.info(f"目标路径是目录，自动追加文件名: {save_path}")
+                elif str(save_path).endswith("/") or str(save_path).endswith("\\"):
+                    # 以斜杠结尾，视为目录
+                    save_path.mkdir(parents=True, exist_ok=True)
+                    import time
+                    save_path = save_path / f"screenshot_{int(time.time())}.png"
+                else: 
+                     # 可能是文件名但没有后缀，加上 .png
+                     save_path = save_path.with_suffix(".png")
+            except Exception as e:
+                logger.warning(f"判断路径类型出错，默认视为文件: {e}")
+
         save_path.parent.mkdir(parents=True, exist_ok=True)
         
         # 保存原始路径，用于查找实际保存的文件
@@ -1240,7 +1320,6 @@ class SystemTools:
             temp_script_path = temp_script_dir / f"script_{int(time_module.time())}.py"
             
             # 处理脚本内容：可能是 base64 编码，也可能是普通字符串
-            import base64
             script_content = None
             
             # 首先尝试 base64 解码
@@ -2137,6 +2216,462 @@ class SystemTools:
     
     # ========== 文本AI处理 ==========
     
+    def _list_files(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        列出目录下的文件 (Grounding Protocol G)
+        
+        Args:
+            params: 包含 path (可选，默认桌面)
+        """
+        path_str = params.get("path", "~/Desktop")
+        try:
+            full_path = Path(path_str).expanduser().resolve()
+            if not full_path.exists():
+                # SMART 回馈：如果父目录存在，报错时附带父目录内容
+                parent = full_path.parent
+                suggestion = ""
+                if parent.exists():
+                    suggestion = f" 目录不存在，但父目录包含: {[f.name for f in parent.iterdir()][:10]}"
+                return {"success": False, "message": f"目录不存在: {path_str}{suggestion}"}
+            
+            items = []
+            for item in full_path.iterdir():
+                items.append({
+                    "name": item.name,
+                    "type": "dir" if item.is_dir() else "file",
+                    "size": item.stat().st_size if item.is_file() else 0
+                })
+            
+            return {
+                "success": True,
+                "message": f"成功列出 {path_str} 下的 {len(items)} 个项目",
+                "data": {"path": str(full_path), "items": items}
+            }
+        except Exception as e:
+            return {"success": False, "message": f"列出文件失败: {e}"}
+
+    def _get_smart_suggestions(self, target_path: Path) -> Dict[str, Any]:
+        """
+        SMART 错误反馈：生成智能建议（模糊匹配、目录内容等）
+        
+        Args:
+            target_path: 目标文件路径
+        
+        Returns:
+            包含建议信息的字典
+        """
+        import difflib
+        import os
+        
+        parent = target_path.parent
+        suggestions = {
+            "parent_directory": str(parent),
+            "directory_contents": [],
+            "similar_files": [],
+            "same_extension_files": [],
+            "subdirectories": []
+        }
+        
+        # 如果父目录不存在，尝试搜索常见目录
+        if not parent.exists():
+            # 尝试在用户主目录下搜索
+            home = Path.home()
+            common_dirs = [
+                home / "Desktop",
+                home / "Downloads",
+                home / "Documents",
+                home
+            ]
+            
+            for common_dir in common_dirs:
+                if common_dir.exists():
+                    suggestions["parent_directory"] = str(common_dir)
+                    parent = common_dir
+                    break
+        
+        if not parent.exists():
+            return suggestions
+        
+        # 收集目录内容
+        try:
+            all_items = list(parent.iterdir())
+            
+            # 1. 获取所有文件（带详细信息）
+            files = []
+            for item in all_items:
+                if item.is_file():
+                    try:
+                        stat = item.stat()
+                        files.append({
+                            "name": item.name,
+                            "type": "file",
+                            "size": stat.st_size,
+                            "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+                        })
+                    except Exception:
+                        files.append({
+                            "name": item.name,
+                            "type": "file",
+                            "size": 0,
+                            "modified": "unknown"
+                        })
+            
+            # 2. 获取子目录
+            dirs = [item.name for item in all_items if item.is_dir()]
+            
+            # 3. 模糊匹配相似文件名
+            all_file_names = [f["name"] for f in files]
+            if target_path.name and all_file_names:
+                similar = difflib.get_close_matches(
+                    target_path.name, 
+                    all_file_names, 
+                    n=5, 
+                    cutoff=0.3  # 降低阈值以匹配更多文件
+                )
+                suggestions["similar_files"] = similar
+            
+            # 4. 同扩展名文件
+            if target_path.suffix:
+                same_ext = [
+                    f["name"] for f in files 
+                    if f["name"].lower().endswith(target_path.suffix.lower())
+                ][:10]
+                suggestions["same_extension_files"] = same_ext
+            
+            # 5. 限制返回的文件数量（避免信息过载）
+            suggestions["directory_contents"] = files[:20]
+            suggestions["subdirectories"] = dirs[:10]
+            
+        except Exception as e:
+            logger.warning(f"生成智能建议时出错: {e}")
+        
+        return suggestions
+
+    def _analyze_document(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        智能文档分析 (Phase 37)
+        """
+        file_path = params.get("file_path")
+        action = params.get("action", "map")
+        
+        if not file_path:
+            return {"success": False, "message": "缺失文档路径"}
+
+        # 缓存检查 (Protocol R3)
+        cache = (context or {}).get("_file_context_buffer", {})
+        
+        # 1. 尝试从文件夹智能搜索
+        path = Path(file_path).expanduser().resolve()
+        if not path.exists():
+            # SMART Error Reporting: 如果文件不存在，提供智能建议 (Protocol G+)
+            suggestions = self._get_smart_suggestions(path)
+            
+            error_msg = f"未找到文档: {file_path}"
+            if suggestions.get("similar_files"):
+                error_msg += f"。发现相似文件: {', '.join(suggestions['similar_files'][:3])}"
+            elif suggestions.get("directory_contents"):
+                error_msg += f"。目录内容: {', '.join([f['name'] for f in suggestions['directory_contents'][:5]])}"
+            
+            return {
+                "success": False,
+                "message": error_msg,
+                "suggestions": suggestions
+            }
+        
+        file_key = str(path)
+
+        # 2. 执行处理逻辑
+        try:
+            if action == "map":
+                # 检查缓存
+                if file_key in cache and "map" in cache[file_key]:
+                    return {"success": True, "message": "从缓存中恢复报告", "data": cache[file_key]["map"]}
+                
+                data = self.doc_processor.get_document_map(file_key)
+                if "error" not in data:
+                    if file_key not in cache: cache[file_key] = {}
+                    cache[file_key]["map"] = data # 存入缓存
+            elif action == "read":
+                page_num = params.get("page_num")
+                # 读特定页
+                data = self.doc_processor.read_specific_chunk(file_key, page_num=page_num, keywords=params.get("keywords"))
+            elif action == "analyze":
+                # 深度分析逻辑
+                doc_map = self.doc_processor.get_document_map(file_key)
+                if "error" in doc_map: return {"success": False, "message": doc_map["error"]}
+                
+                content_data = self.doc_processor.read_specific_chunk(file_key, page_num=1)
+                content = content_data.get("content", "")
+                
+                query = params.get("query", "请总结这份文档。")
+                prompt = f"文件: {path.name}\n结构: {json.dumps(doc_map)}\n\n内容:\n{content}\n\n问题: {query}"
+                return self._text_process({"text": prompt, "action": "summarize"})
+            else:
+                return {"success": False, "message": f"不支持的操作: {action}"}
+
+            return {
+                "success": "error" not in data,
+                "message": "文档处理成功" if "error" not in data else data["error"],
+                "data": data
+            }
+        except Exception as e:
+            return {"success": False, "message": f"处理失败: {e}"}
+
+    def _run_applescript(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        运行 AppleScript (Phase 38 伏笔)
+        """
+        script = params.get("script")
+        if not script:
+            return {"success": False, "message": "缺失脚本内容"}
+            
+        try:
+            process = subprocess.Popen(
+                ['osascript', '-e', script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = process.communicate()
+            
+            if process.returncode == 0:
+                return {"success": True, "message": "AppleScript 执行成功", "data": stdout.strip()}
+            else:
+                return {"success": False, "message": f"AppleScript 报错: {stderr}"}
+        except Exception as e:
+            return {"success": False, "message": f"执行异常: {e}"}
+
+    def _parse_calendar_events(self, list_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        解析日历事件列表（从 AppleScript 返回的 JSON）
+        
+        Args:
+            list_result: list 操作的返回结果
+        
+        Returns:
+            事件列表，每个事件包含 title, start, end
+        """
+        events = []
+        
+        if not list_result.get("success"):
+            return events
+        
+        data = list_result.get("data", "")
+        if not data:
+            return events
+        
+        try:
+            # 尝试解析 JSON
+            if data.strip().startswith("["):
+                events = json.loads(data)
+            else:
+                # 如果不是 JSON，尝试从原始文本中提取
+                # AppleScript 可能返回 "event 1, event 2" 格式
+                logger.warning("日历事件列表不是 JSON 格式，无法解析")
+        except json.JSONDecodeError as e:
+            logger.warning(f"解析日历事件 JSON 失败: {e}")
+        
+        return events
+    
+    def _check_time_conflicts(self, start_time: str, end_time: Optional[str], existing_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        检查时间冲突
+        
+        Args:
+            start_time: 新事件的开始时间（格式: "2026-02-07 10:00:00"）
+            end_time: 新事件的结束时间（可选）
+            existing_events: 现有事件列表
+        
+        Returns:
+            冲突事件列表
+        """
+        conflicts = []
+        
+        try:
+            # 解析新事件的时间
+            new_start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+            
+            # 如果没有提供结束时间，默认1小时
+            if end_time:
+                new_end = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+            else:
+                new_end = new_start + timedelta(hours=1)
+            
+            # 检查每个现有事件
+            for event in existing_events:
+                event_start_str = event.get("start")
+                event_end_str = event.get("end")
+                event_title = event.get("title", "未知事件")
+                
+                if not event_start_str:
+                    continue
+                
+                try:
+                    # 解析现有事件的时间（可能格式不同）
+                    event_start = datetime.strptime(event_start_str, "%Y-%m-%d %H:%M:%S")
+                    
+                    if event_end_str:
+                        event_end = datetime.strptime(event_end_str, "%Y-%m-%d %H:%M:%S")
+                    else:
+                        # 如果没有结束时间，默认1小时
+                        event_end = event_start + timedelta(hours=1)
+                    
+                    # 检查时间重叠
+                    if self._is_time_overlapping(new_start, new_end, event_start, event_end):
+                        conflicts.append({
+                            "title": event_title,
+                            "start": event_start_str,
+                            "end": event_end_str
+                        })
+                except ValueError:
+                    # 时间格式不匹配，跳过
+                    continue
+        
+        except ValueError as e:
+            logger.warning(f"解析时间失败: {e}")
+        
+        return conflicts
+    
+    def _is_time_overlapping(self, start1: datetime, end1: datetime, start2: datetime, end2: datetime) -> bool:
+        """
+        检查两个时间范围是否重叠
+        
+        Args:
+            start1, end1: 第一个时间范围
+            start2, end2: 第二个时间范围
+        
+        Returns:
+            如果重叠返回 True
+        """
+        return start1 < end2 and start2 < end1
+
+    def _manage_calendar_event(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        管理日历事件 (Phase 38)
+        
+        Args:
+            params: 包含
+                - action: create/delete/list (必需)
+                - title: 事件标题 (create/delete时)
+                - start_time: 开始时间 (如 "2026-02-07 10:00:00")
+                - end_time: 结束时间 (可选)
+                - duration: 时长 (分钟, 可选)
+        """
+        action = params.get("action")
+        title = params.get("title", "新会议")
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        duration = params.get("duration")  # 分钟
+        
+        if platform.system() != "Darwin":
+            return {"success": False, "message": "目前仅支持 macOS 系统操控日历"}
+
+        if action == "create":
+            if not start_time: 
+                return {"success": False, "message": "创建事件需要 start_time"}
+            
+            # Protocol Phase 38+: 冲突预警 - 先检查冲突
+            logger.info("🔵 Phase 38+: 创建日历事件前检查冲突...")
+            list_result = self._manage_calendar_event({"action": "list"})
+            existing_events = self._parse_calendar_events(list_result)
+            
+            # 计算结束时间
+            if not end_time and duration:
+                start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+                end_dt = start_dt + timedelta(minutes=int(duration))
+                end_time = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # 检查冲突
+            conflicts = self._check_time_conflicts(start_time, end_time, existing_events)
+            
+            # 创建事件
+            script = f'''
+            tell application "Calendar"
+                tell calendar "Work"
+                    make new event with properties {{summary:"{title}", start date:date "{start_time}"}}
+                end tell
+            end tell
+            '''
+            # 如果 Work 日历不存在，尝试使用第一个日历
+            fallback_script = f'''
+            tell application "Calendar"
+                set theCalendar to first calendar
+                make new event at theCalendar with properties {{summary:"{title}", start date:date "{start_time}"}}
+            end tell
+            '''
+            res = self._run_applescript({"script": script})
+            if not res["success"]:
+                res = self._run_applescript({"script": fallback_script})
+            
+            # 如果有冲突，添加警告信息
+            if conflicts and res.get("success"):
+                conflict_titles = [c["title"] for c in conflicts]
+                res["warnings"] = conflicts
+                res["message"] = res.get("message", "事件已创建") + f"。⚠️ 检测到时间冲突: {', '.join(conflict_titles)}"
+                logger.warning(f"⚠️ 日历事件创建成功，但检测到冲突: {conflict_titles}")
+            
+            return res
+            
+        elif action == "list":
+            # 改进 list 操作：返回 JSON 格式的事件列表
+            script = '''
+            tell application "Calendar"
+                set theCalendar to first calendar
+                set eventsList to {}
+                set allEvents to events of theCalendar
+                repeat with e in allEvents
+                    try
+                        set eventInfo to "{\\"title\\":\\"" & (summary of e) & "\\",\\"start\\":\\"" & (start date of e as string) & "\\""
+                        if end date of e is not missing value then
+                            set eventInfo to eventInfo & ",\\"end\\":\\"" & (end date of e as string) & "\\""
+                        end if
+                        set eventInfo to eventInfo & "}"
+                        set end of eventsList to eventInfo
+                    end try
+                end repeat
+                return "[" & (eventsList as string) & "]"
+            end tell
+            '''
+            result = self._run_applescript({"script": script})
+            
+            # 尝试解析 JSON
+            if result.get("success") and result.get("data"):
+                try:
+                    events_json = json.loads(result["data"])
+                    result["data"] = events_json
+                    result["events"] = events_json  # 兼容字段
+                except json.JSONDecodeError:
+                    logger.warning("无法解析日历事件 JSON，返回原始数据")
+            
+            return result
+            
+        return {"success": False, "message": f"不支持的操作: {action}"}
+
+    def _manage_reminder(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        管理提醒事项 (Phase 38)
+        """
+        action = params.get("action")
+        title = params.get("title")
+        
+        if platform.system() != "Darwin":
+            return {"success": False, "message": "目前仅支持 macOS 系统操控提醒事项"}
+
+        if action == "create":
+            if not title: return {"success": False, "message": "创建提醒需要 title"}
+            script = f'''
+            tell application "Reminders"
+                make new reminder with properties {{name:"{title}"}}
+            end tell
+            '''
+            return self._run_applescript({"script": script})
+        
+        elif action == "list":
+            script = 'tell application "Reminders" to get name of reminders'
+            return self._run_applescript({"script": script})
+
+        return {"success": False, "message": f"不支持的操作: {action}"}
+
     def _text_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         文本AI处理（翻译、总结、润色等）
@@ -2214,3 +2749,779 @@ class SystemTools:
             
         except Exception as e:
             return {"success": False, "message": "文本处理失败: " + str(e), "data": None}
+
+    def _visual_assist(self, params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        视觉助手：分析截图并回答问题（Phase 39）
+        
+        分级调度策略（成本优先）：
+        - L1: 本地OCR（如果查询是文本查找类，成本0，速度<500ms）
+        - L2: VLM语义理解（如果查询需要理解界面布局、外观等，成本较高）
+        
+        Args:
+            params: 包含
+                - action: "query"（问答，默认）/ "locate"（定位）/ "extract_text"（提取文本）
+                - query: 问题（必需），如"屏幕上那个红色的按钮写什么？"
+                - image_path: 图片路径（可选，如果不提供则自动截图）
+                - force_vlm: 是否强制使用VLM（默认False，优先OCR）
+        
+        Returns:
+            分析结果，包含：
+            - answer: 答案文本
+            - coordinates: 坐标信息（如果定位到元素）{"x": 100, "y": 200}
+            - confidence: 置信度（0.0-1.0）
+            - method: 使用的方法（"ocr" 或 "vlm"）
+            - timestamp: 截图时间戳（用于坐标系验证）
+        """
+        import os
+        
+        action = params.get("action", "query")
+        query = params.get("query", "")
+        image_path = params.get("image_path")
+        force_vlm = params.get("force_vlm", False)
+        
+        # extract_text 操作不需要 query 参数（提取所有文本）
+        # query 和 locate 操作需要 query 参数
+        if action != "extract_text" and not query:
+            return {
+                "success": False,
+                "message": f"缺少query参数（{action}操作需要query参数）",
+                "data": {
+                    "error_type": "missing_parameter",
+                    "missing_param": "query",
+                    "suggestion": f"{action}操作需要提供query参数"
+                }
+            }
+        
+        # 对于 extract_text，如果没有 query，使用默认值
+        if action == "extract_text" and not query:
+            query = "提取图片中的所有文字"
+        
+        # 1. 如果没有提供图片路径，先截图
+        if not image_path:
+            logger.info("🔵 visual_assist: 未提供图片路径，自动截图...")
+            screenshot_result = self._screenshot_desktop({})
+            if not screenshot_result.get("success"):
+                return {
+                    "success": False,
+                    "message": f"截图失败: {screenshot_result.get('message')}",
+                    "data": {
+                        "error_type": "screenshot_failed",
+                        "suggestion": "检查截图权限或手动提供图片路径"
+                    }
+                }
+            image_path = screenshot_result["data"]["path"]
+            screenshot_timestamp = time.time()  # 截图完成时间
+            logger.info(f"✅ 截图完成: {image_path}")
+        else:
+            # 验证图片是否存在
+            image_path_obj = Path(image_path).expanduser()
+            if not image_path_obj.exists():
+                return {
+                    "success": False,
+                    "message": f"图片不存在: {image_path}",
+                    "data": {
+                        "error_type": "file_not_found",
+                        "file_path": image_path,
+                        "suggestion": "请检查图片路径是否正确"
+                    }
+                }
+            image_path = str(image_path_obj)
+            # 使用文件修改时间作为时间戳
+            screenshot_timestamp = image_path_obj.stat().st_mtime
+        
+        # 2. 检查坐标系时效性（如果距离截图时间超过5秒，警告）
+        current_time = time.time()
+        if current_time - screenshot_timestamp > 5:
+            logger.warning(f"⚠️ 警告：截图时间戳已过期（{current_time - screenshot_timestamp:.1f}秒），坐标可能不准确")
+        
+        # 3. 分级调度：判断是否可以使用OCR
+        use_ocr_first = not force_vlm and self._should_use_ocr(query)
+        
+        if use_ocr_first and action in ["query", "locate", "extract_text"]:
+            # L1: 尝试OCR优先（成本0，速度快）
+            logger.info("🔵 visual_assist: 使用OCR优先策略（成本0）")
+            ocr_result = self._analyze_with_ocr(image_path, query, action)
+            
+            if ocr_result.get("success"):
+                # 确保 data 字段存在
+                if "data" not in ocr_result:
+                    ocr_result["data"] = {}
+                ocr_result["data"]["method"] = "ocr"
+                ocr_result["data"]["timestamp"] = screenshot_timestamp
+                logger.info("✅ OCR分析成功，跳过VLM调用（节省成本）")
+                return ocr_result
+            
+            # OCR 失败，检查是否需要继续尝试 VLM
+            ocr_data = ocr_result.get("data", {})
+            requires_vlm = ocr_data.get("requires_vlm", False)
+            
+            if requires_vlm:
+                # 视觉理解任务，OCR 无法处理是正常的，继续尝试 VLM
+                logger.info("🔵 OCR 无法处理视觉理解任务（颜色/图标/布局），继续使用 VLM")
+            else:
+                # 文本提取任务但 OCR 失败，记录警告但继续尝试 VLM
+                logger.warning(f"⚠️ OCR 提取文本失败: {ocr_result.get('message')}，继续尝试 VLM")
+        
+        # L2: 使用VLM语义理解（或OCR失败后的降级）
+        logger.info("🔵 visual_assist: 使用VLM语义理解")
+        vlm_result = self._analyze_with_vlm(image_path, query, action)
+        
+        if vlm_result.get("success"):
+            # 确保 data 字段存在
+            if "data" not in vlm_result:
+                vlm_result["data"] = {}
+            vlm_result["data"]["timestamp"] = screenshot_timestamp
+            return vlm_result
+        else:
+            # VLM失败，尝试OCR降级
+            logger.warning("⚠️ VLM分析失败，尝试OCR降级")
+            ocr_result = self._analyze_with_ocr(image_path, query, action)
+            if ocr_result.get("success"):
+                # 确保 data 字段存在
+                if "data" not in ocr_result:
+                    ocr_result["data"] = {}
+                ocr_result["data"]["method"] = "ocr_fallback"
+                ocr_result["data"]["timestamp"] = screenshot_timestamp
+                return ocr_result
+            
+            # 构建详细的错误信息
+            vlm_error = vlm_result.get("message", "未知错误")
+            ocr_error = ocr_result.get("message", "未知错误") if not ocr_result.get("success") else None
+            
+            # 提取建议
+            suggestions = []
+            if "DeepSeek" in vlm_error or "不支持视觉" in vlm_error:
+                suggestions.append("切换到支持视觉的模型：在 config.json 中设置 provider='claude' 或 'openai'，并配置对应的 API Key")
+            if "ddddocr 未安装" in (ocr_error or ""):
+                suggestions.append("安装OCR依赖：运行 'pip install ddddocr'")
+            
+            error_message = "视觉分析失败：VLM和OCR均不可用"
+            if suggestions:
+                error_message += f"\n\n修复建议：\n" + "\n".join(f"- {s}" for s in suggestions)
+            
+            # 判断是否为配置错误（不可恢复）
+            is_config_error = (
+                "DeepSeek" in vlm_error or 
+                "不支持视觉" in vlm_error or 
+                "未配置API Key" in vlm_error or
+                "ddddocr 未安装" in (ocr_error or "") or
+                "pip install" in (ocr_error or "")
+            )
+            
+            return {
+                "success": False,
+                "message": error_message,
+                "data": {
+                    "timestamp": screenshot_timestamp,
+                    "vlm_error": vlm_error,
+                    "ocr_error": ocr_error,
+                    "vlm_data": vlm_result.get("data"),
+                    "ocr_data": ocr_result.get("data") if not ocr_result.get("success") else None,
+                    "suggestions": suggestions,
+                    "is_config_error": is_config_error,  # 标记为配置错误
+                    "requires_user_action": is_config_error  # 需要用户操作
+                }
+            }
+    
+    def _should_use_ocr(self, query: str) -> bool:
+        """
+        判断查询是否适合使用OCR（文本查找类查询）
+        
+        Args:
+            query: 用户查询
+        
+        Returns:
+            True 如果适合OCR，False 如果需要VLM语义理解
+        """
+        # 首先检查是否是视觉理解任务（坐标、颜色、位置等），这些必须使用 VLM
+        if self._is_visual_understanding_query(query):
+            return False
+        
+        query_lower = query.lower()
+        
+        # OCR适合的场景：文本查找、文字识别
+        ocr_keywords = [
+            "有没有", "找到", "查找", "识别", "提取", "读取",
+            "写什么", "是什么字", "什么文字", "什么内容",
+            "包含", "显示", "显示什么"
+        ]
+        
+        # VLM适合的场景：布局、外观、理解、描述
+        vlm_keywords = [
+            "外观", "排版", "布局", "样式", "设计", "界面",
+            "描述", "分析", "理解", "问题", "错误", "异常"
+        ]
+        
+        # 如果包含VLM关键词，优先VLM
+        if any(kw in query_lower for kw in vlm_keywords):
+            return False
+        
+        # 如果包含OCR关键词，优先OCR
+        if any(kw in query_lower for kw in ocr_keywords):
+            return True
+        
+        # 默认：短查询用OCR，长查询用VLM
+        return len(query) < 30
+    
+    def _is_visual_understanding_query(self, query: str) -> bool:
+        """
+        判断查询是否是视觉理解任务（OCR 无法处理，必须使用 VLM）
+        
+        Args:
+            query: 用户查询
+        
+        Returns:
+            True 如果是视觉理解任务（颜色、图标、布局等）
+        """
+        query_lower = query.lower()
+        
+        # 视觉理解任务关键词：颜色、图标、形状、位置、坐标、布局等
+        visual_keywords = [
+            "颜色", "图标", "形状", "位置", "坐标", "布局",
+            "icon", "color", "position", "coordinate", "location",
+            "最明显", "最突出", "左上角", "右下角", "中间", "归一化",
+            "什么颜色", "什么图标", "在哪里", "哪个位置", "给出坐标",
+            "坐标", "位置", "定位", "在哪里", "哪个位置"
+        ]
+        
+        return any(kw in query_lower for kw in visual_keywords)
+    
+    def _analyze_with_ocr(self, image_path: str, query: str, action: str) -> Dict[str, Any]:
+        """
+        使用OCR分析图片（L1：成本0，速度快）
+        
+        Args:
+            image_path: 图片路径
+            query: 查询问题
+            action: 操作类型
+        
+        Returns:
+            OCR分析结果
+        """
+        try:
+            # 读取图片并转换为base64
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            image_base64 = base64.b64encode(image_data).decode()
+            
+            # 检查OCR是否可用
+            if not self.ocr_helper.is_available():
+                return {
+                    "success": False,
+                    "message": "OCR不可用：ddddocr 未安装。请运行 'pip install ddddocr' 安装OCR依赖",
+                    "data": {
+                        "error_type": "missing_dependency",
+                        "dependency": "ddddocr",
+                        "install_command": "pip install ddddocr",
+                        "suggestion": "安装 ddddocr 库以启用OCR功能"
+                    }
+                }
+            
+            # 使用OCR提取文本（优先使用extract_text方法）
+            if hasattr(self.ocr_helper, 'extract_text'):
+                ocr_text = self.ocr_helper.extract_text(image_base64)
+            else:
+                # 降级到recognize_captcha（不限制长度）
+                ocr_text = self.ocr_helper.recognize_captcha(
+                    image_base64, 
+                    confidence_check=False  # 不限制长度，提取所有文本
+                )
+            
+            if not ocr_text:
+                # 检查是否是视觉理解任务（颜色、图标等），OCR 无法处理这些任务
+                is_visual_task = self._is_visual_understanding_query(query)
+                if is_visual_task:
+                    # 视觉理解任务，OCR 无法处理是正常的，返回特殊标记，让调用者继续尝试 VLM
+                    return {
+                        "success": False,
+                        "message": "OCR无法处理视觉理解任务（颜色/图标/布局等），需要VLM",
+                        "data": {
+                            "error_type": "ocr_visual_task",
+                            "requires_vlm": True,  # 标记需要 VLM
+                            "suggestion": "此任务需要视觉理解能力，请使用支持视觉的模型（Claude 或 OpenAI）"
+                        }
+                    }
+                else:
+                    # 文本提取任务，OCR 失败
+                    return {
+                        "success": False,
+                        "message": "OCR未能提取到文本（可能是图片中没有文字，或OCR识别失败）",
+                        "data": {
+                            "error_type": "ocr_no_text",
+                            "suggestion": "如果图片包含文字但识别失败，请检查图片质量或尝试使用VLM"
+                        }
+                    }
+            
+            logger.info(f"✅ OCR提取文本成功（长度: {len(ocr_text)}）")
+            
+            # 检查提取的文字是否过少（可能是OCR能力限制）
+            if len(ocr_text) < 10:
+                logger.warning(f"⚠️ OCR提取的文字较少（{len(ocr_text)}字符），可能不完整")
+                logger.info("💡 如果桌面有更多文字但未识别，建议：1) 安装 Tesseract OCR (brew install tesseract && pip install pytesseract pillow) 2) 或使用支持视觉的模型（Claude/OpenAI）")
+            
+            # 根据action处理
+            if action == "extract_text":
+                # 直接返回提取的文本
+                return {
+                    "success": True,
+                    "message": f"文本提取成功（{len(ocr_text)}字符）" + ("（文字较少，可能不完整）" if len(ocr_text) < 10 else ""),
+                    "data": {
+                        "text": ocr_text,
+                        "method": "ocr",
+                        "text_length": len(ocr_text),
+                        "warning": "文字较少，可能不完整" if len(ocr_text) < 10 else None
+                    }
+                }
+            elif action == "locate":
+                # OCR 无法提供坐标信息，locate 操作必须使用 VLM
+                return {
+                    "success": False,
+                    "message": "OCR无法提供坐标信息，locate操作需要VLM视觉理解能力",
+                    "data": {
+                        "error_type": "ocr_no_coordinates",
+                        "requires_vlm": True,  # 标记需要 VLM
+                        "text": ocr_text,  # 提供OCR文本作为参考
+                        "suggestion": "定位操作需要视觉理解能力，请使用支持视觉的模型（Claude 或 OpenAI）"
+                    }
+                }
+            else:  # action == "query"
+                # 检查查询是否涉及视觉理解（位置、坐标、颜色等）
+                # 即使 OCR 提取到了文本，如果查询需要视觉理解，也应该使用 VLM
+                if self._is_visual_understanding_query(query):
+                    return {
+                        "success": False,
+                        "message": "查询涉及视觉理解（位置/坐标/颜色等），OCR无法提供这些信息，需要VLM",
+                        "data": {
+                            "error_type": "ocr_visual_query",
+                            "requires_vlm": True,  # 标记需要 VLM
+                            "text": ocr_text,  # 提供OCR文本作为参考
+                            "suggestion": "此查询需要视觉理解能力，请使用支持视觉的模型（Claude 或 OpenAI）"
+                        }
+                    }
+                
+                # 使用LLM分析OCR文本（纯文本查询）
+                prompt = f"""
+这是一张截图的OCR文本内容：
+{ocr_text}
+
+请回答以下问题：{query}
+
+注意：如果问题涉及视觉元素的位置、颜色、布局等，OCR无法提供这些信息，请如实说明。
+"""
+                
+                # 调用文本处理（使用现有的text_process）
+                text_result = self._text_process({
+                    "text": prompt,
+                    "action": "summarize"  # 使用summarize作为通用分析
+                })
+                
+                if text_result.get("success"):
+                    return {
+                        "success": True,
+                        "message": "OCR+LLM分析成功",
+                        "data": {
+                            "answer": text_result["data"].get("result", ""),
+                            "ocr_text": ocr_text,
+                            "method": "ocr_llm"
+                        }
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"LLM分析失败: {text_result.get('message')}",
+                        "data": {
+                            "error_type": "llm_analysis_failed",
+                            "llm_error": text_result.get('message'),
+                            "suggestion": "请检查AI配置或重试"
+                        }
+                    }
+                    
+        except Exception as e:
+            logger.error(f"OCR分析失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"OCR分析失败: {e}",
+                "data": {
+                    "error_type": "ocr_exception",
+                    "exception": str(e),
+                    "suggestion": "请检查OCR依赖是否正确安装"
+                }
+            }
+    
+    def _analyze_with_vlm(self, image_path: str, query: str, action: str) -> Dict[str, Any]:
+        """
+        使用VLM（视觉语言模型）分析图片（L2：成本较高，但理解能力强）
+        
+        Args:
+            image_path: 图片路径
+            query: 查询问题
+            action: 操作类型
+        
+        Returns:
+            VLM分析结果
+        """
+        try:
+            # 检测VLM是否可用
+            if not self._is_vlm_available():
+                provider = self.config.provider.lower()
+                if provider == "deepseek":
+                    return {
+                        "success": False,
+                        "message": "VLM不可用：DeepSeek 不支持视觉功能。请在 config.json 中切换到 Claude (claude-3-5-sonnet) 或 OpenAI (gpt-4o-mini)，并配置对应的 API Key",
+                        "data": {
+                            "provider": provider,
+                            "suggestion": "切换到支持视觉的模型：Claude 或 OpenAI"
+                        }
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": f"VLM不可用：当前配置 (provider={provider}, model={self.config.model}) 不支持视觉。请切换到 Claude (claude-3-5-sonnet) 或 OpenAI (gpt-4o-mini)",
+                        "data": {
+                            "provider": provider,
+                            "model": self.config.model,
+                            "suggestion": "切换到支持视觉的模型"
+                        }
+                    }
+            
+            # 读取图片
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            # 根据provider选择VLM API
+            provider = self.config.provider.lower()
+            
+            if provider == "claude":
+                return self._call_claude_vision(image_path, image_data, query, action)
+            elif provider in ["openai", "chatgpt"]:
+                return self._call_openai_vision(image_path, image_data, query, action)
+            elif provider == "deepseek":
+                # DeepSeek 不支持视觉，直接返回错误（不应该到达这里，因为 _is_vlm_available 已经检查）
+                return {
+                    "success": False,
+                    "message": "DeepSeek 不支持视觉功能。请在 config.json 中切换到 Claude (claude-3-5-sonnet) 或 OpenAI (gpt-4o-mini)",
+                    "data": {
+                        "provider": provider,
+                        "suggestion": "切换到支持视觉的模型"
+                    }
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"VLM不支持该提供商: {provider}",
+                    "data": None
+                }
+                
+        except Exception as e:
+            logger.error(f"VLM分析失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"VLM分析失败: {e}",
+                "data": {
+                    "error_type": "vlm_exception",
+                    "exception": str(e),
+                    "suggestion": "请检查VLM配置或重试"
+                }
+            }
+    
+    def _is_vlm_available(self) -> bool:
+        """
+        检测VLM是否可用
+        
+        Returns:
+            True 如果VLM可用
+        """
+        # 检查API Key
+        if not self.config.api_key:
+            logger.warning("⚠️ VLM不可用：未配置API Key")
+            return False
+        
+        # 检查provider是否支持视觉
+        provider = self.config.provider.lower()
+        
+        # DeepSeek 明确不支持视觉
+        if provider == "deepseek":
+            logger.warning("⚠️ VLM不可用：DeepSeek 不支持视觉功能。请切换到 Claude (claude-3-5-sonnet) 或 OpenAI (gpt-4o-mini)")
+            return False
+        
+        vision_supported = provider in ["claude", "openai", "chatgpt"]
+        
+        # 检查模型是否支持视觉
+        model = self.config.model.lower()
+        if provider == "claude":
+            # Claude 3.5 Sonnet 支持视觉
+            vision_supported = vision_supported and "sonnet" in model
+            if not vision_supported:
+                logger.warning(f"⚠️ VLM不可用：Claude 模型 '{model}' 不支持视觉。请使用 claude-3-5-sonnet")
+        elif provider in ["openai", "chatgpt"]:
+            # GPT-4o, GPT-4o-mini 支持视觉
+            vision_supported = vision_supported and ("gpt-4o" in model or "gpt-4-vision" in model)
+            if not vision_supported:
+                logger.warning(f"⚠️ VLM不可用：OpenAI 模型 '{model}' 不支持视觉。请使用 gpt-4o 或 gpt-4o-mini")
+        
+        return vision_supported
+    
+    def _call_claude_vision(self, image_path: str, image_data: bytes, query: str, action: str) -> Dict[str, Any]:
+        """调用Claude Vision API"""
+        try:
+            from anthropic import Anthropic
+            
+            client = Anthropic(api_key=self.config.api_key)
+            model = self.config.model or "claude-3-5-sonnet-20241022"
+            
+            image_base64 = base64.b64encode(image_data).decode()
+            
+            # 构建prompt（根据action调整）
+            if action == "locate":
+                prompt = f"""
+请分析这张截图，找到描述为"{query}"的元素。
+
+如果找到，请返回JSON格式：
+{{
+    "found": true,
+    "x": 100,  # 元素中心X坐标（屏幕坐标系，考虑Retina缩放）
+    "y": 200,  # 元素中心Y坐标
+    "description": "元素描述",
+    "confidence": 0.95
+}}
+
+如果未找到，返回：
+{{
+    "found": false,
+    "reason": "未找到原因"
+}}
+
+注意：macOS Retina屏幕的截图像素可能是2880px，但系统坐标系只有1440px，请返回系统坐标系坐标。
+"""
+            elif action == "extract_text":
+                prompt = f"""
+请提取这张截图中的所有文本内容，返回纯文本格式。
+"""
+            else:  # query
+                prompt = f"""
+请分析这张截图，回答以下问题：{query}
+
+如果问题涉及元素位置，请尽可能提供坐标信息（系统坐标系，考虑Retina缩放）。
+"""
+            
+            message = client.messages.create(
+                model=model,
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": image_base64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }]
+            )
+            
+            response_text = message.content[0].text
+            
+            # 解析响应（尝试提取JSON）
+            result = self._parse_vlm_response(response_text, action)
+            result["method"] = "vlm_claude"
+            
+            return {
+                "success": True,
+                "message": "VLM分析成功",
+                "data": result
+            }
+            
+        except ImportError:
+            return {
+                "success": False,
+                "message": "anthropic库未安装",
+                "data": {
+                    "error_type": "missing_dependency",
+                    "dependency": "anthropic",
+                    "install_command": "pip install anthropic",
+                    "suggestion": "安装 anthropic 库以使用 Claude Vision"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Claude Vision API调用失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"Claude Vision API调用失败: {e}",
+                "data": {
+                    "error_type": "claude_api_error",
+                    "exception": str(e),
+                    "suggestion": "请检查API Key和网络连接"
+                }
+            }
+    
+    def _call_openai_vision(self, image_path: str, image_data: bytes, query: str, action: str) -> Dict[str, Any]:
+        """调用OpenAI Vision API (GPT-4o-mini)"""
+        try:
+            from openai import OpenAI
+            
+            client = OpenAI(api_key=self.config.api_key)
+            model = self.config.model or "gpt-4o-mini"
+            
+            image_base64 = base64.b64encode(image_data).decode()
+            
+            # 构建prompt
+            if action == "locate":
+                prompt = f"""
+请分析这张截图，找到描述为"{query}"的元素。
+
+如果找到，请返回JSON格式：
+{{
+    "found": true,
+    "x": 100,
+    "y": 200,
+    "description": "元素描述",
+    "confidence": 0.95
+}}
+
+注意：macOS Retina屏幕的截图像素可能是2880px，但系统坐标系只有1440px，请返回系统坐标系坐标。
+"""
+            elif action == "extract_text":
+                prompt = "请提取这张截图中的所有文本内容，返回纯文本格式。"
+            else:
+                prompt = f"请分析这张截图，回答以下问题：{query}"
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }],
+                max_tokens=1024
+            )
+            
+            response_text = response.choices[0].message.content
+            
+            # 解析响应
+            result = self._parse_vlm_response(response_text, action)
+            result["method"] = "vlm_openai"
+            
+            return {
+                "success": True,
+                "message": "VLM分析成功",
+                "data": result
+            }
+            
+        except ImportError:
+            return {
+                "success": False,
+                "message": "openai库未安装",
+                "data": {
+                    "error_type": "missing_dependency",
+                    "dependency": "openai",
+                    "install_command": "pip install openai",
+                    "suggestion": "安装 openai 库以使用 OpenAI Vision"
+                }
+            }
+        except Exception as e:
+            logger.error(f"OpenAI Vision API调用失败: {e}", exc_info=True)
+            return {
+                "success": False,
+                "message": f"OpenAI Vision API调用失败: {e}",
+                "data": {
+                    "error_type": "openai_api_error",
+                    "exception": str(e),
+                    "suggestion": "请检查API Key和网络连接"
+                }
+            }
+    
+    def _call_deepseek_vision(self, image_path: str, image_data: bytes, query: str, action: str) -> Dict[str, Any]:
+        """调用DeepSeek Vision API（如果支持）"""
+        # DeepSeek目前可能不支持视觉，返回错误
+        return {
+            "success": False,
+            "message": "DeepSeek目前不支持视觉功能",
+            "data": {
+                "error_type": "provider_not_supported",
+                "provider": "deepseek",
+                "suggestion": "请切换到支持视觉的模型（Claude 或 OpenAI）"
+            }
+        }
+    
+    def _parse_vlm_response(self, response_text: str, action: str) -> Dict[str, Any]:
+        """
+        解析VLM响应（尝试提取JSON，处理坐标信息）
+        
+        Args:
+            response_text: VLM返回的文本
+            action: 操作类型
+        
+        Returns:
+            解析后的结果字典
+        """
+        import json
+        import re
+        
+        result = {
+            "answer": response_text,
+            "coordinates": None,
+            "confidence": 0.8,  # 默认置信度
+            "found": False
+        }
+        
+        # 尝试提取JSON（如果响应包含JSON）
+        try:
+            # 查找JSON对象
+            json_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                parsed = json.loads(json_str)
+                
+                # 提取坐标信息
+                if "x" in parsed and "y" in parsed:
+                    result["coordinates"] = {
+                        "x": int(parsed["x"]),
+                        "y": int(parsed["y"])
+                    }
+                    result["found"] = parsed.get("found", True)
+                    result["confidence"] = parsed.get("confidence", 0.8)
+                
+                # 提取其他字段
+                if "description" in parsed:
+                    result["description"] = parsed["description"]
+                if "reason" in parsed:
+                    result["reason"] = parsed["reason"]
+        except (json.JSONDecodeError, ValueError):
+            # 如果不是JSON，尝试从文本中提取坐标
+            coord_match = re.search(r'[xX]:\s*(\d+)[,\s]+[yY]:\s*(\d+)', response_text)
+            if coord_match:
+                result["coordinates"] = {
+                    "x": int(coord_match.group(1)),
+                    "y": int(coord_match.group(2))
+                }
+                result["found"] = True
+        
+        # 处理Retina缩放（如果坐标看起来是像素坐标）
+        if result["coordinates"]:
+            x, y = result["coordinates"]["x"], result["coordinates"]["y"]
+            # 如果坐标很大（>2000），可能是Retina像素坐标，需要缩放
+            if x > 2000 or y > 2000:
+                logger.warning(f"⚠️ 检测到可能的Retina像素坐标 ({x}, {y})，自动缩放为系统坐标")
+                result["coordinates"]["x"] = x // 2
+                result["coordinates"]["y"] = y // 2
+                result["retina_scaled"] = True
+        
+        return result

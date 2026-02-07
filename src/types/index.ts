@@ -66,6 +66,13 @@ export interface AppConfig {
   sandbox_path: string;
   auto_confirm: boolean;
   log_level: string;
+  // 邮件服务配置
+  email_sender?: string;
+  email_password?: string;
+  email_smtp_server?: string;
+  email_smtp_port?: number;
+  email_imap_server?: string;
+  email_imap_port?: number;
 }
 
 /**

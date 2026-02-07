@@ -199,6 +199,8 @@ class OpenAIPlanner(BasePlanner):
 2. **浏览器操作**：导航网页、点击、填写表单、下载文件、截图网页
 3. **系统操作**：桌面截图、打开/关闭应用、打开文件/文件夹
 4. **脚本执行**：生成并执行Python脚本完成复杂任务
+5. **邮件发送**：发送带附件的邮件，支持多文件自动压缩
+6. **验证码识别**：自动识别并填写简单的图片验证码
 
 **可用工具**（简单任务优先使用）：
 - file_read: 读取文件内容（支持.txt, .docx等）
@@ -222,6 +224,11 @@ class OpenAIPlanner(BasePlanner):
 - open_app: 打开应用程序，params: {{"app_name": "应用名称"}}
 - close_app: 关闭应用程序，params: {{"app_name": "应用名称"}}
 - execute_python_script: 执行Python脚本（用于复杂任务或工具无法满足的需求）
+- send_email: 发送邮件，params: {{"recipient": "收件人", "subject": "主题", "body": "正文", "attachments": ["文件路径列表"]}}
+- compress_files: 压缩文件，params: {{"files": ["文件路径列表"], "output": "输出zip路径", "type": "zip"}}
+- request_qr_login: 请求二维码登录，params: {{"site_name": "网站名称", "qr_selector": "可选选择器"}}
+- request_captcha: 请求验证码识别，params: {{"captcha_image_selector": "图片选择器", "captcha_input_selector": "输入框选择器", "site_name": "网站名"}}
+- request_login: 请求登录，params: {{"site_name": "名称", "username_selector": "可选", "password_selector": "可选"}}
 
 **Python脚本执行**（复杂任务或工具无法满足时使用）：
 - script: Python代码，**必须使用 base64 编码**（避免JSON转义问题）
@@ -243,14 +250,11 @@ class OpenAIPlanner(BasePlanner):
     - **示例1**：如果用户说"强制执行申请书.docx"，脚本中必须使用 `"强制执行申请书.docx"`，**绝对不要**改成 `"大取同学名称.docx"`、`"求正放接探底作品.docx"` 或其他任何名称。
     - **示例2**：如果用户说"总结.txt"，必须使用 `"总结.txt"`，**绝对不要**改成 `"连排.txt"`、`"输克.txt"` 或其他任何名称。
     - **检查方法**：生成脚本后，检查脚本中的文件名是否与用户指令中的文件名完全一致，如果不一致，必须修正。
-  * **Python语法**：
-    - f-string 的正确语法是 f\"...\" 或 f\"\"\"...\"\"\"（f 和引号之间不能有空格），**必须使用双引号**，不要写成 f'\"\"\" 或 f'\"...\"（单引号+双引号混用）
-    - **重要**：f-string 的三引号形式必须是 f\"\"\"...\"\"\"（双引号），**绝对不要**写成 f'\"\"\"（单引号+三引号），这会导致语法错误
-    - 多行字符串使用 f\"\"\"...\"\"\" 或 f\"...\" + \"\\n\"，确保引号正确闭合
-    - 字符串拼接使用 + 时要注意格式，确保引号匹配
-    - **重要**：所有字符串必须正确闭合，不要出现未闭合的引号。例如：summary = f\"\"\"[Document Summary]...\"\"\" 而不是 summary = f\"\"[Document Summary]... 或 summary = f'\"\"\"[Document Summary]...
-    - **错误消息必须简洁**：错误消息应该简短明了，如 \"文件不存在\" 或 \"文件路径错误\"，不要重复文本或生成超长字符串
-    - **字符串闭合检查**：每个字符串字面量（用引号包围的文本）都必须有开始和结束引号，确保引号数量匹配
+  * **Python语法安全**：
+    - **禁止**在 f-string 中使用复杂嵌套引号。例如 `f"Status: {{json.dumps(...)}}"` 极易出错。请分开写：`status_json = json.dumps(...); print(f"Status: {{status_json}}")`
+    - **字符串转义**：如果字符串包含反斜杠（Windows路径），必须使用 raw string (r"...") 或双反斜杠。
+    - **JSON输出**：message 字段尽量使用简单的中文或英文，避免特殊字符（如换行符、未转义的引号）。
+    - **错误处理**：`try-except` 必须捕获所有异常，并且打印的错误信息不能包含可能破坏 JSON 结构的字符。使用 `repr(e)` 而不是 `str(e)` 可以更安全地打印异常。
   * **文件名准确性**：必须使用用户指令中提到的**准确文件名**，不要随意更改文件名。
 
 **路径格式**：
@@ -259,12 +263,27 @@ class OpenAIPlanner(BasePlanner):
 - 支持文件名（系统会自动搜索）
 - 支持 ~ 符号（如 "~/Desktop"）
 
+**优先使用上下文**：
+- 如果用户说 "这个文件"、"这个文件夹"、"整理它"、"帮我处理" 等指代词，但指令中没有明确文件名，**必须优先使用 {context_info} 中的 [用户附加的文件/文件夹] (attached_path)**。
+- 如果 attached_path 为空，尝试使用 [最近操作的文件] (last_created_file)。
+- **切记**：不要凭空捏造文件名，如果找不到任何上下文文件，请在 message 中询问用户。
+
 **重要规则**：
-- **桌面截图任务**：如果用户说"截图桌面"、"桌面截图"、"保存到桌面"等，**必须使用 screenshot_desktop 工具**，并且**如果用户要求保存到桌面，必须传递 save_path 参数**：
-  * 如果用户说"保存到桌面"或"保存桌面"：必须传递 `"save_path": "~/Desktop/screenshot.png"` 或 `"save_path": "~/Desktop"`
+- **桌面截图任务**：
+  * 如果用户要求"截图并保存为..."、"截图并重命名..."、"截图后处理..."：**必须在 screenshot_desktop 步骤中指定一个确定的 save_path**（例如 "~/Desktop/temp_screenshot.png"），以便后续步骤（如 python_script）能准确找到该文件。
+  * 如果用户说"保存到桌面"或"保存桌面"：传递 `"save_path": "~/Desktop/screenshot.png"`（必须包含文件名和 .png 后缀，不要只传目录）
   * 如果用户只说"截图桌面"但没有说保存位置：可以省略 save_path（使用默认位置）
-- **只执行用户明确要求的操作**：如果用户说"截图桌面"，就只截图，不要删除文件、移动文件或其他操作
 - **准确理解用户意图**：如果用户说"保存到桌面"，必须传递 save_path 参数
+
+**工作流模式**：
+- **下载需要登录的网站**：
+  1. browser_navigate
+  2. request_login 或 request_qr_login
+  3. browser_wait (等待登录同步，建议2000-3000ms)
+  4. download_file
+- **发送邮件附件**：
+  1. (如果多个文件) compress_files (注意输出路径必须在 /tmp/ 下)
+  2. send_email
 
 **上下文理解**：
 {context_info}
