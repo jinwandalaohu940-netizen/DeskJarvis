@@ -544,7 +544,16 @@ class DeepSeekPlanner(BasePlanner):
 - list_files: 列出文件 (Grounding) → params: {{"path": "目录路径(如 ~/Desktop)"}}
 - open_app: 打开应用 → params: {{"app_name": "应用名称"}}
 - close_app: 关闭应用 → params: {{"app_name": "应用名称"}}
-- execute_python_script: Python脚本 → params: {{"script": "base64编码的脚本", "reason": "原因", "safety": "安全说明"}}
+- execute_python_script: Python脚本 → params: {{"script": "Python源码（直接写代码，不要Base64编码）", "reason": "原因", "safety": "安全说明"}}
+  - **⚠️ 重要约束**：
+    - **禁止使用 Base64 编码**：script 参数必须是直接的 Python 源码字符串，不要进行 Base64 编码
+    - **处理非ASCII字符**：如果脚本中包含中文等非ASCII字符，请使用以下方式之一：
+      1. 使用原始字符串：`r"中文内容"` 或 `"""中文内容"""`
+      2. 使用 json.dumps()：`json.dumps("中文内容", ensure_ascii=False)`
+      3. 将中文字符串赋值给变量：`title = "验证码邮件"`，然后在代码中使用变量
+    - **邮件标题处理**：处理邮件标题时，直接使用 Python 原始字符串，不要进行复杂的编码或 Base64 包装
+    - **示例（正确）**：`{{"script": "import json\\nprint(json.dumps('验证码', ensure_ascii=False))"}}`
+    - **示例（错误）**：`{{"script": "aW1wb3J0IGpzb24="}}`（Base64 编码，禁止使用）
 {browser_section}
 **系统控制工具**：
 - set_volume: 设置音量 → params: {{"level": 0-100}} 或 {{"action": "mute/unmute/up/down"}}
@@ -555,8 +564,11 @@ class DeepSeekPlanner(BasePlanner):
 - clipboard_write: 写入剪贴板 → params: {{"content": "内容"}}
 - keyboard_type: 键盘输入 → params: {{"text": "要输入的文本"}}
 - keyboard_shortcut: 按键/快捷键（用于回车/Tab/Esc/方向键/⌘C 等）→ params: {{"keys": "command+c"}}，可选 {{"repeat": 2}}（如按两次回车）
-- search_emails: 搜索邮件 → params: {{"query": "搜索词", "folder": "文件夹(可选)", "limit": 10(可选)}}
-  - **重要**: query 必须包含 IMAP 语法（如 `(FROM "xxx")`, `(SUBJECT "xxx")`, `UNSEEN`）。
+- search_emails: 搜索邮件 → params: {{"query": "IMAP查询(如ALL)", "folder": "文件夹(可选)", "limit": 10(可选), "keyword_filter": "关键词(可选)"}}
+  - **重要**: query 必须包含 IMAP 语法（如 `ALL`, `(FROM "xxx")`, `(SUBJECT "xxx")`, `UNSEEN`）。
+  - **keyword_filter**: 可选的关键词过滤，在邮件主题或发件人中搜索（不区分大小写）。
+    - 示例：`{{"query": "ALL", "limit": 10, "keyword_filter": "验证码"}}` - 搜索所有邮件，然后过滤包含"验证码"的
+    - **推荐使用**: 对于简单的标题过滤，优先使用 `keyword_filter` 参数，避免编写 Python 脚本，减少乱码风险
 - get_email_details: 获取邮件详情 → params: {{"id": "邮件ID", "folder": "文件夹(可选)"}}
 - download_attachments: 下载邮件附件 → params: {{"id": "邮件ID", "save_dir": "保存目录", "file_type": "后缀名(如pdf, 可选)", "limit": 数量(可选), "folder": "文件夹(可选)"}}
 - manage_emails: 管理邮件 → params: {{"id": "邮件ID", "action": "move/mark_read", "target_folder": "目标文件夹(如果是move)"}}

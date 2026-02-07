@@ -268,6 +268,13 @@ class EmailExecutor:
         注意：此方法仅执行 IMAP 搜索，不进行语义搜索或向量化。
         如果将来需要添加 SentenceTransformer 或嵌入模型进行语义搜索，
         请添加判断：如果邮件数量超过1封，或者在非语义搜索模式下，跳过嵌入步骤。
+        
+        Args:
+            params: 参数字典
+                - query: IMAP 搜索查询（如 "ALL", "(FROM \"xxx\")"）
+                - folder: 邮件文件夹（可选，默认 "INBOX"）
+                - limit: 返回的最大邮件数量（可选，默认 10）
+                - keyword_filter: 关键词过滤（可选，在主题或发件人中搜索）
         """
         if not self._ensure_reader():
             return {"success": False, "message": "无法连接到邮件服务器"}
@@ -276,11 +283,12 @@ class EmailExecutor:
         query = params.get("query", "ALL")
         folder = params.get("folder", "INBOX")
         limit = params.get("limit", 10)
+        keyword_filter = params.get("keyword_filter")  # 新增：关键词过滤
         
         # 简单处理中文搜索 (IMAP 搜索比较复杂，这里做一个基础转换)
         # 注意：这里的 query 应该是符合 IMAP 语法的，如 '(FROM "xxx")'
         
-        results = self.email_reader.search_emails(query, folder, limit)
+        results = self.email_reader.search_emails(query, folder, limit, keyword_filter=keyword_filter)
         
         # 性能优化：如果邮件数量较多，避免进行耗时的向量化操作
         # 当前实现不包含向量化，但如果将来添加，应在此处添加判断：
@@ -288,9 +296,10 @@ class EmailExecutor:
         #     # 跳过嵌入步骤，直接返回结果
         #     pass
         
+        filter_info = f"（关键词过滤: {keyword_filter}）" if keyword_filter else ""
         return {
             "success": True,
-            "message": f"搜索到 {len(results)} 封邮件",
+            "message": f"搜索到 {len(results)} 封邮件{filter_info}",
             "data": {"emails": results}
         }
 

@@ -74,11 +74,17 @@ class EmailReader:
             
         return False
 
-    def search_emails(self, query: str = "ALL", folder: str = "INBOX", limit: int = 10) -> List[Dict[str, Any]]:
+    def search_emails(self, query: str = "ALL", folder: str = "INBOX", limit: int = 10, keyword_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search for emails matching the query.
         Returns a list of metadata (id, subject, from, date).
         使用 BODY.PEEK[HEADER.FIELDS] 替代 RFC822，提升性能，避免阻塞。
+        
+        Args:
+            query: IMAP 搜索查询（如 "ALL", "(FROM \"xxx\")", "(SUBJECT \"xxx\")"）
+            folder: 邮件文件夹（默认 "INBOX"）
+            limit: 返回的最大邮件数量（默认 10）
+            keyword_filter: 可选的关键词过滤（在主题或发件人中搜索，不区分大小写）
         """
         if not self.mail:
             return []
@@ -116,6 +122,15 @@ class EmailReader:
                 subject = self._decode_mime_header(msg.get("Subject", "No Subject"))
                 sender = self._decode_mime_header(msg.get("From", "Unknown"))
                 date = msg.get("Date", "")
+                
+                # 关键词过滤（如果提供）
+                if keyword_filter:
+                    keyword_lower = keyword_filter.lower()
+                    subject_lower = subject.lower()
+                    sender_lower = sender.lower()
+                    # 如果主题或发件人中不包含关键词，跳过这封邮件
+                    if keyword_lower not in subject_lower and keyword_lower not in sender_lower:
+                        continue
                 
                 results.append({
                     "id": uid_str,

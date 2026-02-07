@@ -1255,6 +1255,16 @@ class SystemTools:
         logger.debug(f"安全检查说明: {safety}")
         logger.debug(f"脚本内容（前500字符）:\n{script[:500]}")
         
+        # 检查脚本是否包含 Base64 编码（避免 Planner 错误使用 Base64）
+        import base64
+        import string
+        script_clean = "".join(script.split())
+        base64_chars = set(string.ascii_letters + string.digits + "+/=_-")
+        looks_like_base64 = len(script_clean) >= 64 and all(c in base64_chars for c in script_clean)
+        if looks_like_base64 and not script.lstrip().startswith(("import ", "from ", "def ", "class ", "#", '"""')):
+            logger.warning("⚠️ 检测到脚本可能是 Base64 编码，建议 Planner 直接使用 Python 源码，避免 Base64 包装")
+            logger.warning("💡 提示：对于包含中文的字符串，使用 json.dumps() 或原始字符串（r''）处理，不要使用 Base64")
+        
         # 使用增强版代码解释器执行
         try:
             result = self.code_interpreter.execute(

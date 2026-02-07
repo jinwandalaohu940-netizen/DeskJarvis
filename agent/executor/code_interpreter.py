@@ -331,7 +331,12 @@ class CodeInterpreter:
                     logger.info("检测到 base64 编码的脚本，已解码（含 urlsafe/padding 容错）")
                     script = decoded_str
                 else:
-                    # 解码失败或解码后不像 Python：按普通字符串处理
+                    # 解码失败或解码后不像 Python：打印前100字符用于调试
+                    if decoded_str is not None:
+                        preview = decoded_str[:100].replace('\n', '\\n').replace('\r', '\\r')
+                        logger.warning(f"⚠️ Base64 解码后内容异常（前100字符）: {preview}")
+                        logger.warning("解码后的内容不像 Python 代码，将按普通字符串处理")
+                    # 按普通字符串处理
                     script = script.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
             else:
                 # 不是 base64：按普通字符串处理
@@ -355,8 +360,15 @@ class CodeInterpreter:
                 ):
                     logger.info("检测到 base64 编码的脚本（宽松解码），已解码")
                     script = decoded_str
-            except Exception:
-                pass
+                else:
+                    # 解码后不像 Python：打印前100字符用于调试
+                    preview = decoded_str[:100].replace('\n', '\\n').replace('\r', '\\r')
+                    logger.warning(f"⚠️ Base64 宽松解码后内容异常（前100字符）: {preview}")
+            except Exception as e:
+                logger.warning(f"⚠️ Base64 解码异常: {e}")
+                # 打印原始脚本的前100字符用于调试
+                preview = script[:100].replace('\n', '\\n').replace('\r', '\\r')
+                logger.debug(f"原始脚本前100字符: {preview}")
         
         # 清理控制字符（保留换行、制表符、回车）
         allowed_control_chars = {'\n', '\r', '\t'}
