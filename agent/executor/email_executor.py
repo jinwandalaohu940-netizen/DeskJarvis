@@ -262,7 +262,13 @@ class EmailExecutor:
         return self.email_reader.connect(sender_email, sender_password)
 
     def _search_emails(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """搜索邮件"""
+        """
+        搜索邮件
+        
+        注意：此方法仅执行 IMAP 搜索，不进行语义搜索或向量化。
+        如果将来需要添加 SentenceTransformer 或嵌入模型进行语义搜索，
+        请添加判断：如果邮件数量超过1封，或者在非语义搜索模式下，跳过嵌入步骤。
+        """
         if not self._ensure_reader():
             return {"success": False, "message": "无法连接到邮件服务器"}
             
@@ -275,6 +281,13 @@ class EmailExecutor:
         # 注意：这里的 query 应该是符合 IMAP 语法的，如 '(FROM "xxx")'
         
         results = self.email_reader.search_emails(query, folder, limit)
+        
+        # 性能优化：如果邮件数量较多，避免进行耗时的向量化操作
+        # 当前实现不包含向量化，但如果将来添加，应在此处添加判断：
+        # if len(results) > 1 or not params.get("semantic_search", False):
+        #     # 跳过嵌入步骤，直接返回结果
+        #     pass
+        
         return {
             "success": True,
             "message": f"搜索到 {len(results)} 封邮件",

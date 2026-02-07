@@ -78,6 +78,7 @@ class EmailReader:
         """
         Search for emails matching the query.
         Returns a list of metadata (id, subject, from, date).
+        使用 BODY.PEEK[HEADER.FIELDS] 替代 RFC822，提升性能，避免阻塞。
         """
         if not self.mail:
             return []
@@ -103,9 +104,10 @@ class EmailReader:
                 # Ensure e_id is string
                 uid_str = e_id.decode() if isinstance(e_id, bytes) else str(e_id)
                 
-                # Use UID FETCH
-                status, msg_data = self.mail.uid('fetch', uid_str, '(RFC822.SIZE BODY[HEADER.FIELDS (SUBJECT FROM DATE)])')
-                if status != 'OK': continue
+                # 使用 BODY.PEEK[HEADER.FIELDS] 仅拉取头部，极大提升速度，避免阻塞
+                status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])')
+                if status != 'OK' or not msg_data or msg_data[0] is None:
+                    continue
                 
                 # Parse header
                 raw_email = msg_data[0][1]
@@ -116,7 +118,7 @@ class EmailReader:
                 date = msg.get("Date", "")
                 
                 results.append({
-                    "id": e_id.decode(),
+                    "id": uid_str,
                     "subject": subject,
                     "from": sender,
                     "date": date
@@ -189,50 +191,63 @@ class EmailReader:
             return []
 
     def get_email_content(self, msg_id: str, folder: str = "INBOX") -> Dict[str, Any]:
-        """Fetch full content of an email by ID"""
+        """
+        Fetch full content of an email by ID.
+        统一返回结构，确保即使失败也包含 body 键，防止 'NoneType' object is not subscriptable 错误。
+        使用 BODY.PEEK[] 获取正文，避免意外改变邮件未读状态。
+        """
+        # 统一返回结构，确保即使失败也包含所有必需键
+        res = {"id": msg_id, "subject": "", "from": "", "body": "", "date": "", "error": None}
+        
         if not self.mail:
-            return {}
+            res["error"] = "Connection error"
+            return res
 
         if not self._select_mailbox(folder):
-            logger.error(f"无法选择文件夹: {folder}")
-            return {"error": "Mailbox selection failed"}
+            res["error"] = "Mailbox selection failed"
+            return res
 
         # Ensure msg_id is string
         uid_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
 
         try:
-            # Use UID FETCH
-            status, msg_data = self.mail.uid('fetch', uid_str, '(RFC822)')
-            if status != 'OK':
-                return {"error": f"Failed to fetch content for {uid_str}: {status}"}
+            # 使用 BODY.PEEK[] 获取正文，避免意外改变邮件未读状态
+            status, msg_data = self.mail.uid('fetch', uid_str, '(BODY.PEEK[])')
+            if status != 'OK' or not msg_data:
+                res["error"] = f"Failed to fetch content for {uid_str}: {status}"
+                return res
 
             raw_email = msg_data[0][1]
             msg = email.message_from_bytes(raw_email)
             
-            subject = self._decode_mime_header(msg.get("Subject", "No Subject"))
-            sender = self._decode_mime_header(msg.get("From", "Unknown"))
+            subject = self._decode_mime_header(msg.get("Subject", ""))
+            sender = self._decode_mime_header(msg.get("From", ""))
+            date = msg.get("Date", "")
             
             body = ""
             if msg.is_multipart():
                 for part in msg.walk():
                     content_type = part.get_content_type()
-                    content_disposition = str(part.get("Content-Disposition"))
+                    content_disposition = str(part.get("Content-Disposition", ""))
                     if content_type == "text/plain" and "attachment" not in content_disposition:
-                        body = part.get_payload(decode=True).decode(errors='ignore')
+                        payload = part.get_payload(decode=True)
+                        body = payload.decode(errors='ignore') if payload else ""
                         break
             else:
-                body = msg.get_payload(decode=True).decode(errors='ignore')
-
-            return {
-                "id": msg_id,
+                payload = msg.get_payload(decode=True)
+                body = payload.decode(errors='ignore') if payload else ""
+            
+            res.update({
                 "subject": subject,
                 "from": sender,
                 "body": body,
-                "date": msg.get("Date", "")
-            }
+                "date": date
+            })
+            return res
         except Exception as e:
             logger.error(f"Error fetching email content: {e}")
-            return {"error": str(e)}
+            res["error"] = str(e)
+            return res
 
     def manage_email(self, msg_id: str, action: str, target_folder: Optional[str] = None, current_folder: str = "INBOX") -> bool:
         """Move, archive, or mark email as read"""

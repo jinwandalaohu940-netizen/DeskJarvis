@@ -132,7 +132,10 @@ class PlanExecutor:
                 error_data = result.get('data') or {}  # 处理 data 为 None 的情况
                 
                 # 检查是否为配置错误（不可恢复，需要用户操作）
-                is_config_error = error_data.get('is_config_error', False) or error_data.get('requires_user_action', False)
+                # 增加空值保护，防止 'NoneType' object has no attribute 'get' 错误
+                is_config_error = error_data.get('is_config_error', False) if error_data else False
+                requires_action = error_data.get('requires_user_action', False) if error_data else False
+                is_config_error = is_config_error or requires_action
                 
                 if is_config_error:
                     logger.warning(f"步骤 {step_index} 失败：配置错误（不可恢复，需要用户操作）")
