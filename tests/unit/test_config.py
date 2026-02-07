@@ -105,6 +105,122 @@ class TestConfigIOAndProperties:
         with pytest.raises(ConfigError):
             Config(config_path=str(cfg_path))
 
+    def test_reload_config(self, tmp_path: Path):
+        """测试重新加载配置"""
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        cfg.set("provider", "claude")
+        cfg.save()
+        
+        # 修改文件
+        cfg.set("provider", "deepseek")
+        cfg.reload()  # 应该重新加载，恢复为 claude
+        assert cfg.provider == "claude"
+
+    def test_save_failure_raises_error(self, tmp_path: Path):
+        """测试保存失败时抛出异常"""
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        
+        # 创建一个只读目录来模拟保存失败
+        readonly_dir = tmp_path / "readonly"
+        readonly_dir.mkdir()
+        readonly_dir.chmod(0o444)  # 只读
+        
+        cfg.config_path = readonly_dir / "config.json"
+        with pytest.raises(ConfigError):
+            cfg.save()
+        
+        readonly_dir.chmod(0o755)  # 恢复权限以便清理
+
+    def test_load_failure_raises_error(self, tmp_path: Path):
+        """测试加载失败时抛出异常"""
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text('{"provider": "claude"}', encoding="utf-8")
+        
+        # 创建一个不可读的文件来模拟加载失败
+        import os
+        cfg_path.chmod(0o000)
+        
+        try:
+            with pytest.raises(ConfigError):
+                Config(config_path=str(cfg_path))
+        finally:
+            cfg_path.chmod(0o644)  # 恢复权限
+
+    def test_default_config_path_creation(self, tmp_path, monkeypatch):
+        """测试默认配置路径创建"""
+        # 模拟 home 目录
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        
+        cfg = Config()  # 使用默认路径
+        config_path = fake_home / ".deskjarvis" / "config.json"
+        assert config_path.exists()
+
+    def test_email_properties(self, tmp_path: Path):
+        """测试邮件相关属性"""
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        
+        # 测试默认值
+        assert cfg.email_sender is None
+        assert cfg.email_password is None
+        assert cfg.email_smtp_server == "smtp.gmail.com"
+        assert cfg.email_smtp_port == 587
+        assert cfg.email_imap_port == 993
+        
+        # 测试设置值
+        cfg.set("email_sender", "test@example.com")
+        cfg.set("email_password", "password123")
+        cfg.set("email_smtp_server", "smtp.qq.com")
+        cfg.set("email_smtp_port", "465")
+        cfg.set("email_imap_port", "143")
+        cfg.save()
+        
+        cfg2 = Config(config_path=str(cfg_path))
+        assert cfg2.email_sender == "test@example.com"
+        assert cfg2.email_password == "password123"
+        assert cfg2.email_smtp_server == "smtp.qq.com"
+        assert cfg2.email_smtp_port == 465
+        assert cfg2.email_imap_port == 143
+
+    def test_email_imap_server_inference(self, tmp_path: Path):
+        """测试 IMAP 服务器自动推断"""
+        cfg_path = tmp_path / "config.json"
+        cfg = Config(config_path=str(cfg_path))
+        
+        # 测试 Gmail
+        cfg.set("email_smtp_server", "smtp.gmail.com")
+        cfg.save()
+        cfg2 = Config(config_path=str(cfg_path))
+        assert cfg2.email_imap_server == "imap.gmail.com"
+        
+        # 测试 QQ
+        cfg.set("email_smtp_server", "smtp.qq.com")
+        cfg.save()
+        cfg3 = Config(config_path=str(cfg_path))
+        assert cfg3.email_imap_server == "imap.qq.com"
+        
+        # 测试 Outlook
+        cfg.set("email_smtp_server", "smtp.outlook.com")
+        cfg.save()
+        cfg4 = Config(config_path=str(cfg_path))
+        assert cfg4.email_imap_server == "outlook.office365.com"
+        
+        # 测试自定义 SMTP（带 smtp. 前缀）
+        cfg.set("email_smtp_server", "smtp.custom.com")
+        cfg.save()
+        cfg5 = Config(config_path=str(cfg_path))
+        assert cfg5.email_imap_server == "imap.custom.com"
+        
+        # 测试显式设置 IMAP
+        cfg.set("email_imap_server", "imap.custom.com")
+        cfg.save()
+        cfg6 = Config(config_path=str(cfg_path))
+        assert cfg6.email_imap_server == "imap.custom.com"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
